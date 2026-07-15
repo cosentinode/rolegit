@@ -75,7 +75,7 @@ After cloning on another machine:
 ```bash
 rolegit login --development-user 12345678
 rolegit unlock
-# .env now exists locally with mode 0600
+# .env now exists locally (mode 0600 on POSIX systems)
 rolegit status
 rolegit lock
 ```
@@ -138,6 +138,8 @@ run `rolegit lock` first.
 - Exact protected paths; Git-ignore-style patterns are planned.
 - Server state and sessions are in memory and disappear on restart.
 - The key-encryption key comes from `ROLEGIT_KEK`; production KMS integration is not implemented.
-- Session tokens are stored in a mode-`0600` file; OS keychain storage is planned.
+- On POSIX systems, session tokens and materialized files are created with mode `0600`. Node's
+  numeric modes do not configure Windows ACLs; use a private Windows profile and appropriate ACLs.
+  OS keychain storage is planned.
 - The authorization service binds to loopback; production TLS and deployment are not implemented.
 - There is no encrypted merge-conflict workflow yet.

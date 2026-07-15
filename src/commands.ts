@@ -36,6 +36,7 @@ import {
 import type { LocalSession, MaterializationLease, MaterializedFile } from "./types.js";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
+const MAX_ENCRYPTED_FILE_SIZE = 4 * Math.ceil(MAX_FILE_SIZE / 3) + 64 * 1024;
 
 export async function initialize(root: string, authServer: string): Promise<void> {
   try {
@@ -99,11 +100,21 @@ async function cleanupMaterializedFiles(
 }
 
 async function cleanupLease(root: string, lease: MaterializationLease, log: boolean): Promise<Error[]> {
-  const failures = await cleanupMaterializedFiles(root, lease.paths, log);
+  let current: MaterializationLease;
   try {
-    await deleteLease(root);
+    current = await loadLease(root);
   } catch (error) {
-    failures.push(error as Error);
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    return [error as Error];
+  }
+  if (current.sessionId !== lease.sessionId) return [];
+
+  const failures = await cleanupMaterializedFiles(root, current.paths, log);
+  try {
+    const latest = await loadLease(root);
+    if (latest.sessionId === lease.sessionId) await deleteLease(root);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") failures.push(error as Error);
   }
   return failures;
 }
@@ -123,6 +134,18 @@ function cleanupError(message: string, failures: Error[]): AggregateError {
     failures,
     `${message}: ${failures.map((failure) => failure.message).join("; ")}`,
   );
+}
+
+async function cleanupExpiredLease(root: string): Promise<Error[]> {
+  let lease: MaterializationLease;
+  try {
+    lease = await loadLease(root);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  if (new Date(lease.expiresAt).getTime() > Date.now()) return [];
+  return cleanupLease(root, lease, false);
 }
 
 export async function seal(root: string, requested: string[]): Promise<void> {
@@ -151,6 +174,7 @@ export async function seal(root: string, requested: string[]): Promise<void> {
         protectedPath,
       );
       const objectPath = policy.files[protectedPath]!.object;
+      await assertNoSymlinkPath(root, objectPath);
       await atomicWrite(
         path.join(root, objectPath),
         Buffer.from(`${JSON.stringify(encrypted, null, 2)}\n`),
@@ -170,7 +194,16 @@ export async function seal(root: string, requested: string[]): Promise<void> {
 
 export async function unlock(root: string, requested: string[]): Promise<LocalSession> {
   const policy = await loadEnclist(root);
-  const session = await loadSession(policy.authServer);
+  const staleFailures = await cleanupExpiredLease(root);
+  let session: LocalSession;
+  try {
+    session = await loadSession(policy.authServer);
+  } catch (error) {
+    throwWithCleanupFailures(error, staleFailures);
+  }
+  if (staleFailures.length > 0) {
+    throw cleanupError("expired lease cleanup completed with errors", staleFailures);
+  }
   const client = new AuthClient(policy.authServer);
   const materialized: MaterializedFile[] = [];
   try {
@@ -182,10 +215,13 @@ export async function unlock(root: string, requested: string[]): Promise<LocalSe
       const objectPath = policy.files[protectedPath]!.object;
       await assertNoSymlinkPath(root, objectPath);
       const objectFile = path.join(root, objectPath);
-      if ((await stat(objectFile)).size > MAX_FILE_SIZE + 64 * 1024) {
+      if ((await stat(objectFile)).size > MAX_ENCRYPTED_FILE_SIZE) {
         throw new Error(`encrypted object for ${protectedPath} exceeds the size limit`);
       }
       const encrypted = parseEncryptedFile(JSON.parse(await readFile(objectFile, "utf8")));
+      if (decodeBase64Url(encrypted.ciphertext).length > MAX_FILE_SIZE) {
+        throw new Error(`encrypted object for ${protectedPath} exceeds the size limit`);
+      }
       const keyResult = await client.unwrap(
         session,
         policy.vaultId,
@@ -263,11 +299,19 @@ export async function lock(root: string, logout = true): Promise<void> {
 }
 
 export async function lockIfSessionExpired(root: string, expectedExpiry: string): Promise<void> {
-  const lease = await loadLease(root);
+  const watchedLease = await loadLease(root);
   let expiry = expectedExpiry;
   while (true) {
     const delay = Math.max(0, new Date(expiry).getTime() - Date.now() + 250);
     await new Promise((resolve) => setTimeout(resolve, delay));
+    let lease: MaterializationLease;
+    try {
+      lease = await loadLease(root);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    if (lease.sessionId !== watchedLease.sessionId) return;
     let current: LocalSession;
     try {
       current = await loadSession(lease.server);

@@ -20,11 +20,18 @@ data keys only after checking the current user's server-side access policy.
 - Rollback to an older valid encrypted Git revision.
 - A compromised authorization service or key-encryption key.
 - Bypassing expiration after an authorized user has deliberately copied a plaintext secret.
-- A malicious same-user process racing filesystem checks while RoleGit reads or materializes files.
+- A malicious same-user process racing filesystem checks while RoleGit reads, writes, or removes
+  files. RoleGit rejects symlinked path components immediately before sensitive operations, but
+  Node does not provide an atomic repository-contained path open, so check/use races remain.
 
 The detached expiry watcher is defense in depth, not a guaranteed erasure mechanism. It removes
-materialized files when the local session expires while the machine is running. The next unlock
-also removes stale materialized files before refusing an expired session.
+unchanged materialized files when the local session expires while the machine is running. The next
+unlock reconciles an expired lease before refusing the expired session: unchanged files are removed,
+while modified or replaced paths are preserved and reported.
+
+On POSIX systems, RoleGit creates local sessions, leases, and materialized files with owner-only
+mode bits. Node's numeric mode options do not enforce an equivalent private ACL on Windows; Windows
+users must protect their profile and RoleGit home with appropriate account ACLs.
 
 ## Cryptography
 

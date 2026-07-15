@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
@@ -22,13 +22,22 @@ import {
 } from "../src/session.js";
 import type { LocalSession, MaterializationLease, MaterializedFile, ServerPolicy } from "../src/types.js";
 
-function localSession(server: string, id: number, token: string): LocalSession {
+function localSession(
+  server: string,
+  id: number,
+  token: string,
+  expiresAt = new Date(Date.now() + 60_000).toISOString(),
+): LocalSession {
   return {
     server,
     token,
-    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    expiresAt,
     user: { id, login: `user-${id}` },
   };
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function leaseFor(
@@ -79,6 +88,14 @@ test("protect, seal, lock, and unlock workflow", async (context) => {
   };
 
   await login(authServer, 101);
+  if (process.platform !== "win32") {
+    const outside = await mkdtemp(path.join(tmpdir(), "rolegit-object-symlink-"));
+    await mkdir(path.join(root, ".rolegit"), { recursive: true });
+    await symlink(outside, path.join(root, ".rolegit", "vault"), "dir");
+    await assert.rejects(() => seal(root, []), /symbolic-link path/);
+    assert.deepEqual(await readdir(outside), []);
+    await rm(path.join(root, ".rolegit", "vault"));
+  }
   await seal(root, []);
   const objectPath = enclist.files[".env"]!.object;
   const encrypted = await readFile(path.join(root, objectPath), "utf8");
@@ -98,6 +115,13 @@ test("protect, seal, lock, and unlock workflow", async (context) => {
 
   await writeFile(path.join(root, ".env"), "SECRET=updated-value\n");
   await seal(root, []);
+
+  const boundary = Buffer.alloc(10 * 1024 * 1024, 0x41);
+  await writeFile(path.join(root, ".env"), boundary);
+  await seal(root, []);
+  await lock(root, false);
+  await unlock(root, []);
+  assert.equal((await stat(path.join(root, ".env"))).size, boundary.length);
 
   await rm(path.join(root, ".enclist"));
   await lock(root);
@@ -209,4 +233,53 @@ test("expiry cleanup does not extend a lease across sessions or delete changed f
   await assert.rejects(() => stat(path.join(root, "clean.env")), { code: "ENOENT" });
   await assert.rejects(() => loadLease(root), { code: "ENOENT" });
   assert.equal((await loadSession(bob.server)).user.id, bob.user.id);
+});
+
+test("stale watcher leaves a replacement session lease and materialization intact", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "rolegit-stale-watcher-"));
+  process.env.ROLEGIT_HOME = path.join(root, ".test-home");
+  const original = Buffer.from("same materialization\n");
+  const oldSession = localSession("http://127.0.0.1:8787", 101, "old-watcher-token");
+  const newSession = localSession(oldSession.server, 101, "new-watcher-token");
+  await writeFile(path.join(root, ".env"), original);
+  await saveLease(leaseFor(root, oldSession, [{
+    path: ".env",
+    digest: materializationDigest(original),
+  }]));
+  const watcher = lockIfSessionExpired(root, new Date(Date.now() + 100).toISOString());
+  await delay(50);
+  await lock(root, false);
+  await writeFile(path.join(root, ".env"), original);
+  await saveLease(leaseFor(root, newSession, [{
+    path: ".env",
+    digest: materializationDigest(original),
+  }]));
+
+  await watcher;
+  assert.equal(await readFile(path.join(root, ".env"), "utf8"), original.toString("utf8"));
+  assert.equal((await loadLease(root)).sessionId, sessionId(newSession));
+});
+
+test("unlock cleans an unchanged lease after offline session expiry", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "rolegit-offline-expiry-"));
+  process.env.ROLEGIT_HOME = path.join(root, ".test-home");
+  const session = localSession(
+    "http://127.0.0.1:8787",
+    101,
+    "expired-token",
+    new Date(Date.now() - 1_000).toISOString(),
+  );
+  const plaintext = Buffer.from("expired materialization\n");
+  await initialize(root, session.server);
+  await writeFile(path.join(root, ".env"), plaintext);
+  await saveSession(session);
+  await saveLease(leaseFor(root, session, [{
+    path: ".env",
+    digest: materializationDigest(plaintext),
+  }]));
+
+  await assert.rejects(() => unlock(root, []), /RoleGit session expired/);
+  await assert.rejects(() => stat(path.join(root, ".env")), { code: "ENOENT" });
+  await assert.rejects(() => loadLease(root), { code: "ENOENT" });
+  await assert.rejects(() => loadSession(session.server), /run `rolegit login` first/);
 });
