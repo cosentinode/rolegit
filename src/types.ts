@@ -71,6 +71,7 @@ export interface MaterializedFile {
 
 export interface MaterializationLease {
   version: 1;
+  repositoryId: string;
   root: string;
   server: string;
   expiresAt: string;

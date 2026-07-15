@@ -26,8 +26,9 @@ import {
   deleteLease,
   deleteSession,
   loadLease,
-  loadRepositoryServer,
+  loadRepositoryServers,
   loadSession,
+  repositoryId,
   refreshLeaseMaterializationUnlocked,
   saveLeaseUnlocked,
   saveRepositoryServer,
@@ -253,6 +254,7 @@ async function unlockUnlocked(root: string, requested: string[]): Promise<LocalS
   try {
     await saveLeaseUnlocked({
       version: 1,
+      repositoryId: repositoryId(root),
       root: path.resolve(root),
       server: policy.authServer,
       expiresAt: session.expiresAt,
@@ -281,27 +283,26 @@ async function lockUnlocked(root: string, logout: boolean): Promise<void> {
   if (lease) failures.push(...await cleanupLease(root, lease, true));
 
   if (logout) {
-    let server = lease?.server;
-    if (!server) {
+    const servers = new Set<string>();
+    if (lease) servers.add(lease.server);
+    try {
+      for (const server of await loadRepositoryServers(root)) servers.add(server);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") failures.push(error as Error);
+    }
+    if (servers.size === 0) {
       try {
-        server = await loadRepositoryServer(root);
-      } catch (repositoryError) {
-        if ((repositoryError as NodeJS.ErrnoException).code !== "ENOENT") {
-          failures.push(repositoryError as Error);
-        } else {
-          try {
-            server = (await loadEnclist(root)).authServer;
-            await saveRepositoryServer(root, server);
-          } catch (error) {
-            failures.push(new Error(
-              `cannot determine authorization server: ${(error as Error).message}`,
-              { cause: error },
-            ));
-          }
-        }
+        const server = (await loadEnclist(root)).authServer;
+        await saveRepositoryServer(root, server);
+        servers.add(server);
+      } catch (error) {
+        failures.push(new Error(
+          `cannot determine authorization server: ${(error as Error).message}`,
+          { cause: error },
+        ));
       }
     }
-    if (server) {
+    for (const server of servers) {
       let session: LocalSession | undefined;
       try {
         session = await loadSession(root, server);
@@ -375,7 +376,27 @@ async function loginUnlocked(
   server: string,
   developmentUser?: number,
 ): Promise<LocalSession> {
-  await saveRepositoryServer(root, server);
+  try {
+    const lease = await loadLease(root);
+    if (lease.server !== server) {
+      throw new Error("authorization server changed while files are unlocked; run `rolegit lock` first");
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  try {
+    for (const previousServer of await loadRepositoryServers(root)) {
+      if (previousServer === server) continue;
+      try {
+        await loadSession(root, previousServer);
+        throw new Error(`another server session is active (${previousServer}); run \`rolegit lock\` first`);
+      } catch (error) {
+        if (!/no RoleGit session|RoleGit session expired/.test((error as Error).message)) throw error;
+      }
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
   const client = new AuthClient(server);
   let session: LocalSession;
   if (developmentUser !== undefined) {
@@ -398,9 +419,13 @@ async function loginUnlocked(
       }
     }
   }
+  let saved = false;
   try {
     await saveSession(root, session);
+    saved = true;
+    await saveRepositoryServer(root, server);
   } catch (error) {
+    if (saved) await deleteSession(root, server, sessionId(session)).catch(() => undefined);
     try {
       await client.logout(session);
     } catch (logoutError) {

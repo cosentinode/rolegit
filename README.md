@@ -136,6 +136,11 @@ than risking data loss. Local sessions are repository-scoped even when repositor
 authorization server, so `lock` invalidates only the current repository's token. A new login cannot
 replace an active local session; run `rolegit lock` first.
 
+RoleGit stores a checkout UUID in Git's private metadata so local cleanup ownership survives moving
+or renaming the checkout without being committed. Repository and session operations use machine-local
+lock files. A lock left by a terminated process is never removed automatically: commands fail with
+its path so the user can verify no RoleGit process is active before removing it.
+
 ## Current Scope
 
 - Exact protected paths; Git-ignore-style patterns are planned.

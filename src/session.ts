@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { normalizeProtectedPath } from "./paths.js";
@@ -10,23 +12,50 @@ function roleGitHome(): string {
   return process.env.ROLEGIT_HOME ?? path.join(homedir(), ".config", "rolegit");
 }
 
-function sessionPath(root: string, server: string): string {
-  const id = createHash("sha256").update(`${path.resolve(root)}\0${server}`).digest("hex");
-  return path.join(roleGitHome(), "sessions", `${id}.json`);
+export function repositoryId(root: string): string {
+  let marker: string;
+  try {
+    const gitPath = execFileSync("git", ["rev-parse", "--git-path", "rolegit-id"], {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    marker = path.resolve(root, gitPath);
+  } catch {
+    return createHash("sha256").update(path.resolve(root)).digest("hex");
+  }
+  try {
+    const value = readFileSync(marker, "utf8").trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(value)) throw new Error("invalid RoleGit checkout identity");
+    return value;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  mkdirSync(path.dirname(marker), { recursive: true, mode: 0o700 });
+  const value = randomUUID();
+  try {
+    writeFileSync(marker, `${value}\n`, { flag: "wx", mode: 0o600 });
+    return value;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const existing = readFileSync(marker, "utf8").trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(existing)) throw new Error("invalid RoleGit checkout identity");
+    return existing;
+  }
 }
 
-function legacySessionPath(server: string): string {
-  const id = createHash("sha256").update(server).digest("hex");
+function sessionPath(root: string, server: string): string {
+  const id = createHash("sha256").update(`${repositoryId(root)}\0${server}`).digest("hex");
   return path.join(roleGitHome(), "sessions", `${id}.json`);
 }
 
 function leasePath(root: string): string {
-  const id = createHash("sha256").update(path.resolve(root)).digest("hex");
+  const id = createHash("sha256").update(repositoryId(root)).digest("hex");
   return path.join(roleGitHome(), "leases", `${id}.json`);
 }
 
 function repositoryPath(root: string): string {
-  const id = createHash("sha256").update(path.resolve(root)).digest("hex");
+  const id = createHash("sha256").update(repositoryId(root)).digest("hex");
   return path.join(roleGitHome(), "repositories", `${id}.json`);
 }
 
@@ -77,21 +106,25 @@ async function withStateLock<T>(destination: string, operation: () => Promise<T>
       handle = undefined;
       if (acquired) await rm(destination, { force: true }).catch(() => undefined);
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      let stale = false;
+      let parsed: Partial<LockOwner>;
       try {
-        const lockStat = await lstat(destination);
-        const parsed = JSON.parse(await readFile(destination, "utf8")) as Partial<LockOwner>;
-        stale =
-          typeof parsed.pid === "number" &&
-          typeof parsed.createdAt === "number" &&
-          (!(await processIsAlive(parsed.pid)) || Date.now() - parsed.createdAt > 3_600_000);
-        if (!stale && Date.now() - lockStat.mtimeMs > 5_000 && typeof parsed.pid !== "number") stale = true;
+        parsed = JSON.parse(await readFile(destination, "utf8")) as Partial<LockOwner>;
       } catch {
-        // A new owner may still be writing; retry until it is readable or old enough to reclaim.
+        try {
+          if (Date.now() - (await lstat(destination)).mtimeMs < 100) {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            continue;
+          }
+        } catch {
+          continue;
+        }
+        throw new Error(`invalid state lock ${destination}; verify no RoleGit process is using it before removal`);
       }
-      if (stale) {
-        await rm(destination, { force: true });
-        continue;
+      if (typeof parsed.pid !== "number" || typeof parsed.token !== "string") {
+        throw new Error(`invalid state lock ${destination}; verify no RoleGit process is using it before removal`);
+      }
+      if (!(await processIsAlive(parsed.pid))) {
+        throw new Error(`stale state lock ${destination}; verify the owner exited before removal`);
       }
       if (Date.now() >= deadline) throw new Error(`timed out waiting for state lock ${destination}`);
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -118,28 +151,8 @@ function withSessionLock<T>(root: string, server: string, operation: () => Promi
   return withStateLock(`${sessionPath(root, server)}.lock`, operation);
 }
 
-async function migrateLegacySession(root: string, server: string): Promise<void> {
-  try {
-    await lstat(sessionPath(root, server));
-    return;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  try {
-    const legacy = legacySessionPath(server);
-    const legacyStat = await lstat(legacy);
-    if (legacyStat.isSymbolicLink() || !legacyStat.isFile()) {
-      throw new Error("refusing non-regular legacy session file");
-    }
-    await rename(legacy, sessionPath(root, server));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-}
-
 export async function saveSession(root: string, session: LocalSession): Promise<void> {
   await withSessionLock(root, session.server, async () => {
-    await migrateLegacySession(root, session.server);
     try {
       const existing = await loadSessionUnlocked(root, session.server);
       if (sessionId(existing) !== sessionId(session)) {
@@ -153,20 +166,36 @@ export async function saveSession(root: string, session: LocalSession): Promise<
 }
 
 export async function saveRepositoryServer(root: string, server: string): Promise<void> {
-  await writePrivateJson(repositoryPath(root), { root: path.resolve(root), server });
+  let servers: string[] = [];
+  try {
+    servers = await loadRepositoryServers(root);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  await writePrivateJson(repositoryPath(root), {
+    repositoryId: repositoryId(root),
+    servers: [...new Set([...servers, server])],
+  });
 }
 
-export async function loadRepositoryServer(root: string): Promise<string> {
+export async function loadRepositoryServers(root: string): Promise<string[]> {
   const source = repositoryPath(root);
   const repositoryStat = await lstat(source);
   if (repositoryStat.isSymbolicLink() || !repositoryStat.isFile()) {
     throw new Error("refusing non-regular repository session metadata");
   }
-  const parsed = JSON.parse(await readFile(source, "utf8")) as { root?: unknown; server?: unknown };
-  if (parsed.root !== path.resolve(root) || typeof parsed.server !== "string") {
+  const parsed = JSON.parse(await readFile(source, "utf8")) as {
+    repositoryId?: unknown;
+    servers?: unknown;
+  };
+  if (
+    parsed.repositoryId !== repositoryId(root) ||
+    !Array.isArray(parsed.servers) ||
+    !parsed.servers.every((server) => typeof server === "string")
+  ) {
     throw new Error("invalid repository session metadata");
   }
-  return parsed.server;
+  return parsed.servers;
 }
 
 async function loadSessionUnlocked(root: string, server: string): Promise<LocalSession> {
@@ -205,10 +234,7 @@ async function loadSessionUnlocked(root: string, server: string): Promise<LocalS
 }
 
 export function loadSession(root: string, server: string): Promise<LocalSession> {
-  return withSessionLock(root, server, async () => {
-    await migrateLegacySession(root, server);
-    return loadSessionUnlocked(root, server);
-  });
+  return withSessionLock(root, server, () => loadSessionUnlocked(root, server));
 }
 
 export async function deleteSession(
@@ -217,7 +243,6 @@ export async function deleteSession(
   expectedSessionId?: string,
 ): Promise<void> {
   await withSessionLock(root, server, async () => {
-    await migrateLegacySession(root, server);
     if (expectedSessionId) {
       try {
         const current = await loadSessionUnlocked(root, server);
@@ -320,7 +345,8 @@ export async function loadLease(root: string): Promise<MaterializationLease> {
   const lease = parsed as Partial<MaterializationLease>;
   if (
     lease.version !== 1 ||
-    lease.root !== path.resolve(root) ||
+    lease.repositoryId !== repositoryId(root) ||
+    typeof lease.root !== "string" ||
     typeof lease.server !== "string" ||
     typeof lease.expiresAt !== "string" ||
     !Number.isSafeInteger(lease.userId) ||
