@@ -10,10 +10,10 @@ import type {
   ServerPolicy,
   TeamRule,
 } from "./types.js";
-import { atomicWrite } from "./files.js";
-import { normalizeProtectedPath } from "./paths.js";
+import { atomicWrite, gitMetadataPath } from "./files.js";
+import { normalizePlaintextPath, normalizeProtectedPath } from "./paths.js";
 
-export { normalizeProtectedPath } from "./paths.js";
+export { normalizePlaintextPath, normalizeProtectedPath } from "./paths.js";
 
 export const ENCLIST_NAME = ".enclist";
 export const MAX_SESSION_MINUTES = 365 * 24 * 60;
@@ -67,7 +67,7 @@ export function parseEnclist(value: unknown): Enclist {
   const files: Record<string, EnclistFile> = {};
   const portablePaths = new Map<string, string>();
   for (const [rawPath, rawFile] of Object.entries(rawFiles)) {
-    const protectedPath = normalizeProtectedPath(rawPath);
+    const protectedPath = normalizePlaintextPath(rawPath);
     if (files[protectedPath]) throw new Error(`duplicate protected path: ${protectedPath}`);
     const portablePath = protectedPath.toLowerCase();
     const alias = portablePaths.get(portablePath);
@@ -85,6 +85,17 @@ export function parseEnclist(value: unknown): Enclist {
   return { version: 1, vaultId, authServer, files };
 }
 
+function assertNoGitMetadataFiles(root: string, policy: Enclist): void {
+  const metadataPath = gitMetadataPath(root)?.toLowerCase();
+  if (metadataPath === undefined) return;
+  for (const protectedPath of Object.keys(policy.files)) {
+    const portablePath = protectedPath.toLowerCase();
+    if (metadataPath === "." || portablePath === metadataPath || portablePath.startsWith(`${metadataPath}/`)) {
+      throw new Error(`Git metadata cannot be protected: ${protectedPath}`);
+    }
+  }
+}
+
 export async function loadEnclist(root: string): Promise<Enclist> {
   const policyPath = path.join(root, ENCLIST_NAME);
   const policyStat = await lstat(policyPath);
@@ -92,7 +103,9 @@ export async function loadEnclist(root: string): Promise<Enclist> {
     throw new Error("refusing non-regular .enclist");
   }
   const content = await readFile(policyPath, "utf8");
-  return parseEnclist(JSON.parse(content));
+  const policy = parseEnclist(JSON.parse(content));
+  assertNoGitMetadataFiles(root, policy);
+  return policy;
 }
 
 export async function saveEnclist(root: string, policy: Enclist): Promise<void> {
@@ -106,6 +119,7 @@ export async function saveEnclist(root: string, policy: Enclist): Promise<void> 
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   const validated = parseEnclist(policy);
+  assertNoGitMetadataFiles(root, validated);
   await atomicWrite(policyPath, Buffer.from(`${JSON.stringify(validated, null, 2)}\n`), 0o644);
 }
 
@@ -141,7 +155,7 @@ export function parseServerPolicy(value: unknown): ServerPolicy {
     const files: Record<string, AccessRule> = {};
     const portablePaths = new Map<string, string>();
     for (const [rawPath, rawRule] of Object.entries(rawFiles)) {
-      const protectedPath = normalizeProtectedPath(rawPath);
+      const protectedPath = normalizePlaintextPath(rawPath);
       const portablePath = protectedPath.toLowerCase();
       const alias = portablePaths.get(portablePath);
       if (alias !== undefined && alias !== protectedPath) {

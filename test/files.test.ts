@@ -14,10 +14,12 @@ import {
   materializationDigest,
   removeMaterializedFile,
 } from "../src/files.js";
+import { encryptedObjectPath, loadEnclist } from "../src/policy.js";
 
 async function temporaryDirectory(context: TestContext, prefix: string): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), prefix));
   context.after(() => rm(root, { recursive: true, force: true }));
+  process.env.ROLEGIT_HOME = path.join(root, ".test-home");
   return root;
 }
 
@@ -64,6 +66,44 @@ test("protect rejects a case alias of an existing protected path", async (contex
   await assert.rejects(() => protect(root, "config.env"), /differs only by case/);
 });
 
+test("protect rejects tracked and historical path case aliases", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-git-case-alias-");
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  execFileSync("git", ["config", "user.email", "test@rolegit.local"], { cwd: root });
+  execFileSync("git", ["config", "user.name", "RoleGit Test"], { cwd: root });
+  await initialize(root, "http://127.0.0.1:8787");
+  await writeFile(path.join(root, "Config.env"), "SECRET=tracked-case-alias\n");
+  execFileSync("git", ["add", "Config.env"], { cwd: root });
+
+  await assert.rejects(() => protect(root, "config.env"), /already tracked/);
+  execFileSync("git", ["commit", "--quiet", "-m", "track case alias"], { cwd: root });
+  execFileSync("git", ["rm", "--quiet", "Config.env"], { cwd: root });
+  await assert.rejects(() => protect(root, "config.env"), /exists in Git history/);
+});
+
+test("protect rejects portable RoleGit and Git metadata namespaces", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-metadata-paths-");
+  const gitDirectory = path.join(root, "control");
+  execFileSync("git", ["init", "--quiet", `--separate-git-dir=${gitDirectory}`, root]);
+  await initialize(root, "http://127.0.0.1:8787");
+
+  for (const metadataPath of [
+    ".ENCLIST",
+    ".enclist/child",
+    ".ROLEGIT",
+    ".rolegit/file",
+    ".GIT",
+    ".git/config",
+    "CONTROL/config",
+  ]) {
+    await assert.rejects(() => protect(root, metadataPath), /metadata cannot be protected/);
+  }
+  const policy = await loadEnclist(root);
+  policy.files["CONTROL/config"] = { object: encryptedObjectPath("CONTROL/config") };
+  await writeFile(path.join(root, ".enclist"), `${JSON.stringify(policy)}\n`);
+  await assert.rejects(() => loadEnclist(root), /Git metadata cannot be protected/);
+});
+
 test("materialized-file removal refuses paths outside the repository", async (context) => {
   const parent = await temporaryDirectory(context, "rolegit-removal-");
   const root = path.join(parent, "repository");
@@ -87,6 +127,8 @@ test("Git safety checks distinguish negative results from operational failures",
   assert.equal(gitPathIsTracked(root, ".env"), false);
   assert.equal(gitPathIsIgnored(root, ".env"), false);
   assert.equal(gitPathExistsInHistory(root, ".env"), false);
+  await writeFile(path.join(root, ".gitignore"), "/Config.env\n");
+  assert.equal(gitPathIsIgnored(root, "config.env"), true);
 
   await writeFile(path.join(root, ".git", "config"), "[broken\n");
   assert.throws(() => gitPathIsTracked(root, ".env"), /git ls-files failed/);

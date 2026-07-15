@@ -5,7 +5,8 @@ import { lstat, mkdir, open, readFile, realpath, rename, rm, stat } from "node:f
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { normalizeProtectedPath } from "./paths.js";
+import { gitMetadataPath } from "./files.js";
+import { normalizePlaintextPath } from "./paths.js";
 import type { LocalSession, MaterializationLease, MaterializedFile } from "./types.js";
 
 function roleGitHome(): string {
@@ -377,7 +378,7 @@ export function sessionId(session: LocalSession): string {
   return createHash("sha256").update(session.token).digest("hex");
 }
 
-function normalizeMaterializedFile(value: unknown): MaterializedFile {
+function normalizeMaterializedFile(value: unknown, root?: string): MaterializedFile {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error("invalid materialization lease");
   }
@@ -385,7 +386,16 @@ function normalizeMaterializedFile(value: unknown): MaterializedFile {
   if (typeof file.path !== "string" || !/^[a-f0-9]{64}$/.test(file.digest ?? "")) {
     throw new Error("invalid materialization lease");
   }
-  return { path: normalizeProtectedPath(file.path), digest: file.digest! };
+  const protectedPath = normalizePlaintextPath(file.path);
+  const metadataPath = root === undefined ? undefined : gitMetadataPath(root)?.toLowerCase();
+  const portablePath = protectedPath.toLowerCase();
+  if (
+    metadataPath !== undefined &&
+    (metadataPath === "." || portablePath === metadataPath || portablePath.startsWith(`${metadataPath}/`))
+  ) {
+    throw new Error("materialization lease cannot contain Git metadata");
+  }
+  return { path: protectedPath, digest: file.digest! };
 }
 
 export async function saveLeaseUnlocked(lease: MaterializationLease): Promise<void> {
@@ -405,7 +415,9 @@ export async function saveLeaseUnlocked(lease: MaterializationLease): Promise<vo
       }
     }
     const paths = new Map(existing?.paths.map((file) => [file.path, file]));
-    for (const file of lease.paths.map(normalizeMaterializedFile)) paths.set(file.path, file);
+    for (const file of lease.paths.map((file) => normalizeMaterializedFile(file, lease.root))) {
+      paths.set(file.path, file);
+    }
     await writePrivateJson(leasePath(lease.root), { ...lease, paths: [...paths.values()] });
 }
 
@@ -434,7 +446,7 @@ export async function refreshLeaseMaterializationUnlocked(
   ) {
     throw new Error("materialized file belongs to a different session; run `rolegit lock` first");
   }
-  lease.paths[index] = normalizeMaterializedFile(file);
+  lease.paths[index] = normalizeMaterializedFile(file, root);
   lease.expiresAt = session.expiresAt;
   await writePrivateJson(leasePath(root), lease);
 }
@@ -471,7 +483,7 @@ export async function loadLease(root: string): Promise<MaterializationLease> {
   ) throw new Error("invalid materialization lease");
   return {
     ...(lease as MaterializationLease),
-    paths: lease.paths.map(normalizeMaterializedFile),
+    paths: lease.paths.map((file) => normalizeMaterializedFile(file, root)),
   };
 }
 

@@ -805,13 +805,79 @@ test("changing servers requires locking active sessions and leases first", async
   const plaintext = Buffer.from("active server lease\n");
   await writeFile(path.join(root, ".env"), plaintext);
   await saveLease(leaseFor(root, firstSession, [{ path: ".env", digest: materializationDigest(plaintext) }]));
-  await assert.rejects(() => login(root, secondUrl, 101), /authorization server changed while files are unlocked/);
+  await assert.rejects(() => login(root, secondUrl, 101), /files are unlocked/);
   assert.equal(secondLogins, 0);
 
   await lock(root);
   assert.equal(firstLogouts, 1);
   await login(root, secondUrl, 101);
   assert.equal(secondLogins, 1);
+});
+
+test("same-server login cleans expired materialization before replacing the session", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-expired-relogin-");
+  process.env.ROLEGIT_HOME = path.join(root, ".test-home");
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  let logins = 0;
+  const server = createServer((request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    if (request.url === "/v1/auth/development") {
+      logins += 1;
+      response.end(JSON.stringify({
+        session: {
+          token: "replacement-token",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          user: { id: 202, login: "replacement-user" },
+        },
+      }));
+    } else response.end("{}");
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  context.after(() => server.close());
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const expired = localSession(url, 101, "expired-materialization-token", new Date(Date.now() - 1_000).toISOString());
+  const plaintext = Buffer.from("expired login materialization\n");
+  await initialize(root, url);
+  await saveSession(root, expired);
+  await writeFile(path.join(root, ".env"), plaintext);
+  await saveLease(leaseFor(root, expired, [{ path: ".env", digest: materializationDigest(plaintext) }]));
+
+  const replacement = await login(root, url, 202);
+  assert.equal(logins, 1);
+  assert.equal(replacement.user.id, 202);
+  await assert.rejects(() => stat(path.join(root, ".env")), { code: "ENOENT" });
+  await assert.rejects(() => loadLease(root), { code: "ENOENT" });
+  assert.equal((await loadSession(root, url)).token, replacement.token);
+});
+
+test("same-server login aborts before authentication when expired cleanup fails", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-failed-expired-relogin-");
+  process.env.ROLEGIT_HOME = path.join(root, ".test-home");
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  let logins = 0;
+  const server = createServer((request, response) => {
+    if (request.url === "/v1/auth/development") logins += 1;
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end("{}");
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  context.after(() => server.close());
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const expired = localSession(url, 101, "failed-cleanup-token", new Date(Date.now() - 1_000).toISOString());
+  const original = Buffer.from("original expired materialization\n");
+  await initialize(root, url);
+  await saveSession(root, expired);
+  await writeFile(path.join(root, ".env"), "modified expired materialization\n");
+  await saveLease(leaseFor(root, expired, [{ path: ".env", digest: materializationDigest(original) }]));
+
+  await assert.rejects(() => login(root, url, 202), /expired lease cleanup.*modified materialized file/);
+  assert.equal(logins, 0);
+  assert.equal(await readFile(path.join(root, ".env"), "utf8"), "modified expired materialization\n");
+  assert.equal((await loadLease(root)).sessionId, sessionId(expired));
+  await assert.rejects(() => login(root, url, 202), /expired lease cleanup.*modified materialized file/);
+  assert.equal(logins, 0);
 });
 
 test("repository-scoped lock leaves another repository session and lease intact", async (context) => {

@@ -11,6 +11,7 @@ import {
   gitPathIsIgnored,
   gitPathExistsInHistory,
   gitPathIsTracked,
+  gitMetadataPath,
   materializationDigest,
   removeMaterializedFile,
   writeMaterializedFile,
@@ -19,7 +20,7 @@ import {
   createEnclist,
   encryptedObjectPath,
   loadEnclist,
-  normalizeProtectedPath,
+  normalizePlaintextPath,
   saveEnclist,
 } from "./policy.js";
 import {
@@ -61,8 +62,13 @@ export function initialize(root: string, authServer: string): Promise<void> {
 
 async function protectUnlocked(root: string, inputPath: string): Promise<void> {
   const relativeInput = path.isAbsolute(inputPath) ? path.relative(root, inputPath) : inputPath;
-  const protectedPath = normalizeProtectedPath(relativeInput);
-  if (protectedPath === ".enclist" || protectedPath.startsWith(".rolegit/")) {
+  const protectedPath = normalizePlaintextPath(relativeInput);
+  const portablePath = protectedPath.toLowerCase();
+  const metadataNamespaces = [gitMetadataPath(root)]
+    .filter((entry): entry is string => entry !== undefined)
+    .map((entry) => entry.toLowerCase());
+  if (metadataNamespaces.some((entry) =>
+    entry === "." || portablePath === entry || portablePath.startsWith(`${entry}/`))) {
     throw new Error("RoleGit metadata cannot be protected");
   }
   const policy = await loadEnclist(root);
@@ -92,7 +98,7 @@ export function protect(root: string, inputPath: string): Promise<void> {
 
 function selectFiles(files: Record<string, { object: string }>, requested: string[]): string[] {
   if (requested.length === 0) return Object.keys(files);
-  const normalized = requested.map(normalizeProtectedPath);
+  const normalized = requested.map(normalizePlaintextPath);
   for (const protectedPath of normalized) {
     if (!files[protectedPath]) throw new Error(`${protectedPath} is not listed in .enclist`);
   }
@@ -116,7 +122,12 @@ async function cleanupMaterializedFiles(
   return failures;
 }
 
-async function cleanupLease(root: string, lease: MaterializationLease, log: boolean): Promise<Error[]> {
+async function cleanupLease(
+  root: string,
+  lease: MaterializationLease,
+  log: boolean,
+  retainOnFailure = false,
+): Promise<Error[]> {
   let current: MaterializationLease;
   try {
     current = await loadLease(root);
@@ -127,7 +138,9 @@ async function cleanupLease(root: string, lease: MaterializationLease, log: bool
   if (current.sessionId !== lease.sessionId) return [];
 
   const failures = await cleanupMaterializedFiles(root, current.paths, log);
-  await deleteLeaseUnlocked(root).catch((error: unknown) => failures.push(error as Error));
+  if (!retainOnFailure || failures.length === 0) {
+    await deleteLeaseUnlocked(root).catch((error: unknown) => failures.push(error as Error));
+  }
   return failures;
 }
 
@@ -148,7 +161,7 @@ function cleanupError(message: string, failures: Error[]): AggregateError {
   );
 }
 
-async function cleanupExpiredLease(root: string): Promise<Error[]> {
+async function cleanupExpiredLease(root: string, retainOnFailure = false): Promise<Error[]> {
   let lease: MaterializationLease;
   try {
     lease = await loadLease(root);
@@ -157,7 +170,7 @@ async function cleanupExpiredLease(root: string): Promise<Error[]> {
     throw error;
   }
   if (new Date(lease.expiresAt).getTime() > Date.now()) return [];
-  return cleanupLease(root, lease, false);
+  return cleanupLease(root, lease, false, retainOnFailure);
 }
 
 async function sealUnlocked(root: string, requested: string[]): Promise<void> {
@@ -387,11 +400,13 @@ async function loginUnlocked(
   server: string,
   developmentUser?: number,
 ): Promise<LocalSession> {
+  const expiredLeaseFailures = await cleanupExpiredLease(root, true);
+  if (expiredLeaseFailures.length > 0) {
+    throw cleanupError("expired lease cleanup completed with errors", expiredLeaseFailures);
+  }
   try {
-    const lease = await loadLease(root);
-    if (lease.server !== server) {
-      throw new Error("authorization server changed while files are unlocked; run `rolegit lock` first");
-    }
+    await loadLease(root);
+    throw new Error("files are unlocked; run `rolegit lock` before logging in again");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }

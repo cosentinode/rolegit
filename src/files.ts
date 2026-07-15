@@ -1,9 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { lstatSync, realpathSync } from "node:fs";
 import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import path from "node:path";
 
-import { normalizeProtectedPath } from "./paths.js";
+import { normalizePlaintextPath } from "./paths.js";
 import type { MaterializedFile } from "./types.js";
 
 export function repositoryRoot(cwd = process.cwd()): string {
@@ -32,9 +33,38 @@ function gitFailure(operation: string, error: unknown): never {
   throw new Error(`git ${operation} failed${stderr ? `: ${stderr}` : ""}`, { cause: error });
 }
 
+function portablePathspec(relativePath: string): string {
+  return `:(icase,literal)${relativePath}`;
+}
+
+export function gitMetadataPath(root: string): string | undefined {
+  try {
+    lstatSync(path.join(root, ".git"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  let gitDirectory: string;
+  try {
+    gitDirectory = execFileSync("git", ["rev-parse", "--absolute-git-dir"], {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch (error) {
+    gitFailure("rev-parse", error);
+  }
+  const canonicalRoot = realpathSync.native(root);
+  const canonicalGitDirectory = realpathSync.native(gitDirectory);
+  const relative = path.relative(canonicalRoot, canonicalGitDirectory);
+  if (relative === "") return ".";
+  if (path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`)) return undefined;
+  return relative.split(path.sep).join("/");
+}
+
 export function gitPathIsTracked(root: string, relativePath: string): boolean {
   try {
-    execFileSync("git", ["ls-files", "--error-unmatch", "--", relativePath], {
+    execFileSync("git", ["ls-files", "--error-unmatch", "--", portablePathspec(relativePath)], {
       cwd: root,
       stdio: ["ignore", "ignore", "pipe"],
     });
@@ -47,7 +77,7 @@ export function gitPathIsTracked(root: string, relativePath: string): boolean {
 
 export function gitPathIsIgnored(root: string, relativePath: string): boolean {
   try {
-    execFileSync("git", ["check-ignore", "--quiet", "--", relativePath], {
+    execFileSync("git", ["-c", "core.ignorecase=true", "check-ignore", "--quiet", "--", relativePath], {
       cwd: root,
       stdio: ["ignore", "ignore", "pipe"],
     });
@@ -60,11 +90,15 @@ export function gitPathIsIgnored(root: string, relativePath: string): boolean {
 
 export function gitPathExistsInHistory(root: string, relativePath: string): boolean {
   try {
-    const output = execFileSync("git", ["log", "--all", "--format=%H", "--", relativePath], {
-      cwd: root,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const output = execFileSync(
+      "git",
+      ["log", "--all", "--format=%H", "--", portablePathspec(relativePath)],
+      {
+        cwd: root,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
     return output.trim().length > 0;
   } catch (error) {
     gitFailure("log", error);
@@ -134,7 +168,7 @@ export async function writeMaterializedFile(
   relativePath: string,
   data: Buffer,
 ): Promise<void> {
-  const normalized = normalizeProtectedPath(relativePath);
+  const normalized = normalizePlaintextPath(relativePath);
   await assertNoSymlinkPath(root, normalized);
   const destination = path.join(root, normalized);
   await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
@@ -156,7 +190,7 @@ export async function writeMaterializedFile(
 }
 
 export async function removeMaterializedFile(root: string, file: MaterializedFile): Promise<void> {
-  const normalized = normalizeProtectedPath(file.path);
+  const normalized = normalizePlaintextPath(file.path);
   await assertNoSymlinkPath(root, normalized);
   const destination = path.join(root, normalized);
   let destinationStat;

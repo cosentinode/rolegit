@@ -12,7 +12,7 @@ import {
   type GitHubAppClient,
   type GitHubIdentity,
 } from "./github.js";
-import { normalizeProtectedPath } from "./policy.js";
+import { normalizePlaintextPath } from "./policy.js";
 import type { ServerPolicy, WrappedKey } from "./types.js";
 
 interface ActiveSession {
@@ -229,7 +229,7 @@ export function createAuthServer(options: AuthServerOptions) {
         if (typeof body.vaultId !== "string" || typeof body.path !== "string") {
           throw new Error("vaultId and path are required");
         }
-        const protectedPath = normalizeProtectedPath(body.path);
+        const protectedPath = normalizePlaintextPath(body.path);
         await authorize(session, body.vaultId, protectedPath);
         const key = generateDataKey();
         const wrappedKey = wrapDataKey(
@@ -252,7 +252,7 @@ export function createAuthServer(options: AuthServerOptions) {
           typeof body.wrappedKey !== "object" ||
           body.wrappedKey === null
         ) throw new Error("vaultId, path, and wrappedKey are required");
-        const protectedPath = normalizeProtectedPath(body.path);
+        const protectedPath = normalizePlaintextPath(body.path);
         await authorize(session, body.vaultId, protectedPath);
         const wrappedKey = body.wrappedKey as unknown as WrappedKey;
         if (wrappedKey.kid !== options.policy.keyId) throw new Error("unknown key-encryption key");

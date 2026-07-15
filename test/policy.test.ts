@@ -16,7 +16,22 @@ test("normalizes repository-relative protected paths", () => {
 });
 
 test("rejects non-portable Windows paths and case aliases", () => {
-  for (const unsafe of ["NUL", "con.txt", "secrets. ", "secrets.", "secrets:stream", "a?.env"]) {
+  for (const unsafe of [
+    "NUL",
+    "con.txt",
+    "CONIN$",
+    "conout$.txt",
+    "CLOCK$",
+    "COM0.log",
+    "COM\u00b9",
+    "com\u00b2.env",
+    "LPT\u00b3.log",
+    "lpt0",
+    "secrets. ",
+    "secrets.",
+    "secrets:stream",
+    "a?.env",
+  ]) {
     assert.throws(() => normalizeProtectedPath(unsafe), /Windows/);
   }
   const files = {
@@ -65,6 +80,28 @@ test("enclist rejects encrypted object aliases", () => {
     }),
     /canonical vault path/,
   );
+});
+
+test("policies reject portable metadata namespaces", () => {
+  for (const protectedPath of [".ENCLIST", ".rolegit", ".ROLEGIT/file", ".git/config"]) {
+    assert.throws(() => parseEnclist({
+      version: 1,
+      vaultId: "vault",
+      authServer: "http://127.0.0.1:8787",
+      files: { [protectedPath]: { object: encryptedObjectPath(protectedPath) } },
+    }), /metadata cannot be protected/);
+  }
+  assert.throws(() => parseServerPolicy({
+    version: 1,
+    sessionMinutes: 60,
+    keyId: "dev",
+    vaults: {
+      vault: {
+        repository: "acme/project",
+        files: { ".GIT/config": { users: [1], teams: [] } },
+      },
+    },
+  }), /metadata cannot be protected/);
 });
 
 test("enclist only permits loopback HTTP", () => {

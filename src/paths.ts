@@ -1,5 +1,7 @@
 import path from "node:path";
 
+const WINDOWS_DEVICE_NAME = /^(con|prn|aux|nul|clock\$|conin\$|conout\$|com(?:[0-9]|\u00b9|\u00b2|\u00b3)|lpt(?:[0-9]|\u00b9|\u00b2|\u00b3))$/i;
+
 export function normalizeProtectedPath(value: string): string {
   if (/[\x00-\x1f]/.test(value)) {
     throw new Error("protected path contains unsupported characters");
@@ -20,9 +22,19 @@ export function normalizeProtectedPath(value: string): string {
       throw new Error(`protected path is not portable to Windows: ${value}`);
     }
     const deviceName = component.split(".", 1)[0]!;
-    if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(deviceName)) {
+    if (WINDOWS_DEVICE_NAME.test(deviceName)) {
       throw new Error(`protected path uses a reserved Windows name: ${value}`);
     }
+  }
+  return normalized;
+}
+
+export function normalizePlaintextPath(value: string): string {
+  const normalized = normalizeProtectedPath(value);
+  const portablePath = normalized.toLowerCase();
+  if ([".enclist", ".rolegit", ".git"].some((metadataPath) =>
+    portablePath === metadataPath || portablePath.startsWith(`${metadataPath}/`))) {
+    throw new Error(`repository metadata cannot be protected: ${value}`);
   }
   return normalized;
 }
