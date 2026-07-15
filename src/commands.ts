@@ -28,13 +28,13 @@ import {
   loadLease,
   loadRepositoryServer,
   loadSession,
-  refreshLeaseMaterialization,
-  saveLease,
+  refreshLeaseMaterializationUnlocked,
+  saveLeaseUnlocked,
   saveRepositoryServer,
   saveSession,
   sessionId,
   sessionTimeRemaining,
-  withLeaseLock,
+  withRepositoryLock,
 } from "./session.js";
 import type { LocalSession, MaterializationLease, MaterializedFile } from "./types.js";
 
@@ -105,20 +105,18 @@ async function cleanupMaterializedFiles(
 }
 
 async function cleanupLease(root: string, lease: MaterializationLease, log: boolean): Promise<Error[]> {
-  return withLeaseLock(root, async () => {
-    let current: MaterializationLease;
-    try {
-      current = await loadLease(root);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-      return [error as Error];
-    }
-    if (current.sessionId !== lease.sessionId) return [];
+  let current: MaterializationLease;
+  try {
+    current = await loadLease(root);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    return [error as Error];
+  }
+  if (current.sessionId !== lease.sessionId) return [];
 
-    const failures = await cleanupMaterializedFiles(root, current.paths, log);
-    await deleteLease(root).catch((error: unknown) => failures.push(error as Error));
-    return failures;
-  });
+  const failures = await cleanupMaterializedFiles(root, current.paths, log);
+  await deleteLease(root).catch((error: unknown) => failures.push(error as Error));
+  return failures;
 }
 
 function throwWithCleanupFailures(error: unknown, failures: Error[]): never {
@@ -150,9 +148,9 @@ async function cleanupExpiredLease(root: string): Promise<Error[]> {
   return cleanupLease(root, lease, false);
 }
 
-export async function seal(root: string, requested: string[]): Promise<void> {
+async function sealUnlocked(root: string, requested: string[]): Promise<void> {
   const policy = await loadEnclist(root);
-  const session = await loadSession(policy.authServer);
+  const session = await loadSession(root, policy.authServer);
   const client = new AuthClient(policy.authServer);
   for (const protectedPath of selectFiles(policy.files, requested)) {
     if (!gitPathIsIgnored(root, protectedPath) || gitPathIsTracked(root, protectedPath)) {
@@ -182,7 +180,7 @@ export async function seal(root: string, requested: string[]): Promise<void> {
         Buffer.from(`${JSON.stringify(encrypted, null, 2)}\n`),
         0o600,
       );
-      await refreshLeaseMaterialization(root, session, {
+      await refreshLeaseMaterializationUnlocked(root, session, {
         path: protectedPath,
         digest: materializationDigest(plaintext),
       });
@@ -194,12 +192,16 @@ export async function seal(root: string, requested: string[]): Promise<void> {
   }
 }
 
-export async function unlock(root: string, requested: string[]): Promise<LocalSession> {
+export function seal(root: string, requested: string[]): Promise<void> {
+  return withRepositoryLock(root, () => sealUnlocked(root, requested));
+}
+
+async function unlockUnlocked(root: string, requested: string[]): Promise<LocalSession> {
   const policy = await loadEnclist(root);
   const staleFailures = await cleanupExpiredLease(root);
   let session: LocalSession;
   try {
-    session = await loadSession(policy.authServer);
+    session = await loadSession(root, policy.authServer);
   } catch (error) {
     throwWithCleanupFailures(error, staleFailures);
   }
@@ -249,7 +251,7 @@ export async function unlock(root: string, requested: string[]): Promise<LocalSe
     throwWithCleanupFailures(error, await cleanupMaterializedFiles(root, materialized, false));
   }
   try {
-    await saveLease({
+    await saveLeaseUnlocked({
       version: 1,
       root: path.resolve(root),
       server: policy.authServer,
@@ -264,7 +266,11 @@ export async function unlock(root: string, requested: string[]): Promise<LocalSe
   return session;
 }
 
-export async function lock(root: string, logout = true): Promise<void> {
+export function unlock(root: string, requested: string[]): Promise<LocalSession> {
+  return withRepositoryLock(root, () => unlockUnlocked(root, requested));
+}
+
+async function lockUnlocked(root: string, logout: boolean): Promise<void> {
   const failures: Error[] = [];
   let lease: MaterializationLease | undefined;
   try {
@@ -272,30 +278,24 @@ export async function lock(root: string, logout = true): Promise<void> {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") failures.push(error as Error);
   }
-  if (lease) {
-    try {
-      failures.push(...await cleanupLease(root, lease, true));
-    } catch (error) {
-      failures.push(error as Error);
-    }
-  }
+  if (lease) failures.push(...await cleanupLease(root, lease, true));
 
   if (logout) {
     let server = lease?.server;
     if (!server) {
       try {
-        server = (await loadEnclist(root)).authServer;
-        await saveRepositoryServer(root, server);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-          failures.push(error as Error);
+        server = await loadRepositoryServer(root);
+      } catch (repositoryError) {
+        if ((repositoryError as NodeJS.ErrnoException).code !== "ENOENT") {
+          failures.push(repositoryError as Error);
         } else {
           try {
-            server = await loadRepositoryServer(root);
-          } catch (repositoryError) {
+            server = (await loadEnclist(root)).authServer;
+            await saveRepositoryServer(root, server);
+          } catch (error) {
             failures.push(new Error(
-              `cannot determine authorization server: ${(repositoryError as Error).message}`,
-              { cause: repositoryError },
+              `cannot determine authorization server: ${(error as Error).message}`,
+              { cause: error },
             ));
           }
         }
@@ -304,7 +304,7 @@ export async function lock(root: string, logout = true): Promise<void> {
     if (server) {
       let session: LocalSession | undefined;
       try {
-        session = await loadSession(server);
+        session = await loadSession(root, server);
       } catch {
         // Invalid, expired, or missing local sessions still need deletion.
       }
@@ -316,13 +316,17 @@ export async function lock(root: string, logout = true): Promise<void> {
         }
       }
       try {
-        await deleteSession(server);
+        await deleteSession(root, server, session && sessionId(session));
       } catch (error) {
         failures.push(error as Error);
       }
     }
   }
   if (failures.length > 0) throw cleanupError("lock completed with errors", failures);
+}
+
+export function lock(root: string, logout = true): Promise<void> {
+  return withRepositoryLock(root, () => lockUnlocked(root, logout));
 }
 
 export function expiryWatcherDelay(expiresAt: string, now = Date.now()): number {
@@ -332,37 +336,41 @@ export function expiryWatcherDelay(expiresAt: string, now = Date.now()): number 
 }
 
 export async function lockIfSessionExpired(root: string, expectedExpiry: string): Promise<void> {
-  const watchedLease = await loadLease(root);
+  const watchedLease = await withRepositoryLock(root, () => loadLease(root));
   let expiry = expectedExpiry;
   while (true) {
     const delay = expiryWatcherDelay(expiry);
     await new Promise((resolve) => setTimeout(resolve, delay));
-    let lease: MaterializationLease;
-    try {
-      lease = await loadLease(root);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-      throw error;
-    }
-    if (lease.sessionId !== watchedLease.sessionId) return;
-    let current: LocalSession;
-    try {
-      current = await loadSession(lease.server);
-    } catch {
-      const failures = await cleanupLease(root, lease, false);
-      if (failures.length > 0) throw cleanupError("expiry cleanup completed with errors", failures);
-      return;
-    }
-    if (current.user.id !== lease.userId || sessionId(current) !== lease.sessionId) {
-      const failures = await cleanupLease(root, lease, false);
-      if (failures.length > 0) throw cleanupError("expiry cleanup completed with errors", failures);
-      return;
-    }
-    expiry = current.expiresAt;
+    const nextExpiry = await withRepositoryLock(root, async () => {
+      let lease: MaterializationLease;
+      try {
+        lease = await loadLease(root);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+        throw error;
+      }
+      if (lease.sessionId !== watchedLease.sessionId) return undefined;
+      let current: LocalSession;
+      try {
+        current = await loadSession(root, lease.server);
+      } catch {
+        const failures = await cleanupLease(root, lease, false);
+        if (failures.length > 0) throw cleanupError("expiry cleanup completed with errors", failures);
+        return undefined;
+      }
+      if (current.user.id !== lease.userId || sessionId(current) !== lease.sessionId) {
+        const failures = await cleanupLease(root, lease, false);
+        if (failures.length > 0) throw cleanupError("expiry cleanup completed with errors", failures);
+        return undefined;
+      }
+      return current.expiresAt;
+    });
+    if (!nextExpiry) return;
+    expiry = nextExpiry;
   }
 }
 
-export async function login(
+async function loginUnlocked(
   root: string,
   server: string,
   developmentUser?: number,
@@ -390,14 +398,34 @@ export async function login(
       }
     }
   }
-  await saveSession(session);
+  try {
+    await saveSession(root, session);
+  } catch (error) {
+    try {
+      await client.logout(session);
+    } catch (logoutError) {
+      throw new AggregateError(
+        [error, logoutError],
+        `failed to persist session and revoke replacement token: ${(logoutError as Error).message}`,
+      );
+    }
+    throw error;
+  }
   console.log(`Logged in as ${session.user.login}`);
   console.log(`Session expires at ${session.expiresAt}`);
   return session;
 }
 
-export async function printStatus(server: string): Promise<void> {
-  const session = await loadSession(server);
+export function login(
+  root: string,
+  server: string,
+  developmentUser?: number,
+): Promise<LocalSession> {
+  return withRepositoryLock(root, () => loginUnlocked(root, server, developmentUser));
+}
+
+export async function printStatus(root: string, server: string): Promise<void> {
+  const session = await loadSession(root, server);
   const minutes = Math.ceil(sessionTimeRemaining(session) / 60_000);
   console.log(`${session.user.login}: ${minutes} minute${minutes === 1 ? "" : "s"} remaining`);
 }

@@ -132,7 +132,9 @@ always clears the local session token when its repository/server association is 
 no files are unlocked. It reports remote logout failures; the remote token then remains valid only
 until its fixed expiry. RoleGit preserves any materialized path that was modified or replaced after
 the latest successful `unlock` or `seal`, reports the path, and relinquishes its cleanup lease rather
-than risking data loss. A new login cannot replace an active local session; run `rolegit lock` first.
+than risking data loss. Local sessions are repository-scoped even when repositories use the same
+authorization server, so `lock` invalidates only the current repository's token. A new login cannot
+replace an active local session; run `rolegit lock` first.
 
 ## Current Scope
 

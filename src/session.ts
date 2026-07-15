@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import path from "node:path";
@@ -10,8 +10,8 @@ function roleGitHome(): string {
   return process.env.ROLEGIT_HOME ?? path.join(homedir(), ".config", "rolegit");
 }
 
-function sessionPath(server: string): string {
-  const id = createHash("sha256").update(server).digest("hex");
+function sessionPath(root: string, server: string): string {
+  const id = createHash("sha256").update(`${path.resolve(root)}\0${server}`).digest("hex");
   return path.join(roleGitHome(), "sessions", `${id}.json`);
 }
 
@@ -41,16 +41,90 @@ async function writePrivateJson(destination: string, value: unknown): Promise<vo
   }
 }
 
-export async function saveSession(session: LocalSession): Promise<void> {
+interface LockOwner {
+  pid: number;
+  token: string;
+  createdAt: number;
+}
+
+async function processIsAlive(pid: number): Promise<boolean> {
   try {
-    const existing = await loadSession(session.server);
-    if (sessionId(existing) !== sessionId(session)) {
-      throw new Error("another session is active; run `rolegit lock` before logging in again");
-    }
+    process.kill(pid, 0);
+    return true;
   } catch (error) {
-    if (!/no RoleGit session|RoleGit session expired/.test((error as Error).message)) throw error;
+    return (error as NodeJS.ErrnoException).code === "EPERM";
   }
-  await writePrivateJson(sessionPath(session.server), session);
+}
+
+async function withStateLock<T>(destination: string, operation: () => Promise<T>): Promise<T> {
+  await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+  const owner: LockOwner = { pid: process.pid, token: randomUUID(), createdAt: Date.now() };
+  const deadline = Date.now() + 30_000;
+  let handle;
+  while (!handle) {
+    try {
+      handle = await open(destination, "wx", 0o600);
+      await handle.writeFile(JSON.stringify(owner));
+      await handle.sync();
+    } catch (error) {
+      const acquired = handle !== undefined;
+      await handle?.close().catch(() => undefined);
+      handle = undefined;
+      if (acquired) await rm(destination, { force: true }).catch(() => undefined);
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      let stale = false;
+      try {
+        const lockStat = await lstat(destination);
+        const parsed = JSON.parse(await readFile(destination, "utf8")) as Partial<LockOwner>;
+        stale =
+          typeof parsed.pid === "number" &&
+          typeof parsed.createdAt === "number" &&
+          (!(await processIsAlive(parsed.pid)) || Date.now() - parsed.createdAt > 3_600_000);
+        if (!stale && Date.now() - lockStat.mtimeMs > 5_000 && typeof parsed.pid !== "number") stale = true;
+      } catch {
+        // A new owner may still be writing; retry until it is readable or old enough to reclaim.
+      }
+      if (stale) {
+        await rm(destination, { force: true });
+        continue;
+      }
+      if (Date.now() >= deadline) throw new Error(`timed out waiting for state lock ${destination}`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  try {
+    return await operation();
+  } finally {
+    await handle.close().catch(() => undefined);
+    try {
+      const current = JSON.parse(await readFile(destination, "utf8")) as Partial<LockOwner>;
+      if (current.token === owner.token) await rm(destination, { force: true });
+    } catch {
+      // A missing or replaced lock is not owned by this operation.
+    }
+  }
+}
+
+export function withRepositoryLock<T>(root: string, operation: () => Promise<T>): Promise<T> {
+  return withStateLock(`${leasePath(root)}.operation.lock`, operation);
+}
+
+function withSessionLock<T>(root: string, server: string, operation: () => Promise<T>): Promise<T> {
+  return withStateLock(`${sessionPath(root, server)}.lock`, operation);
+}
+
+export async function saveSession(root: string, session: LocalSession): Promise<void> {
+  await withSessionLock(root, session.server, async () => {
+    try {
+      const existing = await loadSessionUnlocked(root, session.server);
+      if (sessionId(existing) !== sessionId(session)) {
+        throw new Error("another session is active; run `rolegit lock` before logging in again");
+      }
+    } catch (error) {
+      if (!/no RoleGit session|RoleGit session expired/.test((error as Error).message)) throw error;
+    }
+    await writePrivateJson(sessionPath(root, session.server), session);
+  });
 }
 
 export async function saveRepositoryServer(root: string, server: string): Promise<void> {
@@ -70,10 +144,10 @@ export async function loadRepositoryServer(root: string): Promise<string> {
   return parsed.server;
 }
 
-export async function loadSession(server: string): Promise<LocalSession> {
+async function loadSessionUnlocked(root: string, server: string): Promise<LocalSession> {
   let parsed: unknown;
   try {
-    const source = sessionPath(server);
+    const source = sessionPath(root, server);
     const sessionStat = await lstat(source);
     if (sessionStat.isSymbolicLink() || !sessionStat.isFile()) {
       throw new Error("refusing non-regular local session file");
@@ -99,14 +173,33 @@ export async function loadSession(server: string): Promise<LocalSession> {
   const expiresAt = new Date(session.expiresAt).getTime();
   if (!Number.isFinite(expiresAt)) throw new Error("invalid local session expiration");
   if (expiresAt <= Date.now()) {
-    await deleteSession(server);
+    await rm(sessionPath(root, server), { force: true });
     throw new Error("RoleGit session expired; run `rolegit login` again");
   }
   return session as LocalSession;
 }
 
-export async function deleteSession(server: string): Promise<void> {
-  await rm(sessionPath(server), { force: true });
+export function loadSession(root: string, server: string): Promise<LocalSession> {
+  return withSessionLock(root, server, () => loadSessionUnlocked(root, server));
+}
+
+export async function deleteSession(
+  root: string,
+  server: string,
+  expectedSessionId?: string,
+): Promise<void> {
+  await withSessionLock(root, server, async () => {
+    if (expectedSessionId) {
+      try {
+        const current = await loadSessionUnlocked(root, server);
+        if (sessionId(current) !== expectedSessionId) return;
+      } catch (error) {
+        if (/no RoleGit session|RoleGit session expired/.test((error as Error).message)) return;
+        throw error;
+      }
+    }
+    await rm(sessionPath(root, server), { force: true });
+  });
 }
 
 export function sessionTimeRemaining(session: LocalSession): number {
@@ -128,29 +221,7 @@ function normalizeMaterializedFile(value: unknown): MaterializedFile {
   return { path: normalizeProtectedPath(file.path), digest: file.digest! };
 }
 
-export async function withLeaseLock<T>(root: string, operation: () => Promise<T>): Promise<T> {
-  const destination = `${leasePath(root)}.lock`;
-  await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
-  const deadline = Date.now() + 30_000;
-  let handle;
-  while (!handle) {
-    try {
-      handle = await open(destination, "wx", 0o600);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST" || Date.now() >= deadline) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-  }
-  try {
-    return await operation();
-  } finally {
-    await handle.close().catch(() => undefined);
-    await rm(destination, { force: true });
-  }
-}
-
-export async function saveLease(lease: MaterializationLease): Promise<void> {
-  await withLeaseLock(lease.root, async () => {
+export async function saveLeaseUnlocked(lease: MaterializationLease): Promise<void> {
     let existing: MaterializationLease | undefined;
     try {
       existing = await loadLease(lease.root);
@@ -169,35 +240,44 @@ export async function saveLease(lease: MaterializationLease): Promise<void> {
     const paths = new Map(existing?.paths.map((file) => [file.path, file]));
     for (const file of lease.paths.map(normalizeMaterializedFile)) paths.set(file.path, file);
     await writePrivateJson(leasePath(lease.root), { ...lease, paths: [...paths.values()] });
-  });
 }
 
-export async function refreshLeaseMaterialization(
+export function saveLease(lease: MaterializationLease): Promise<void> {
+  return withRepositoryLock(lease.root, () => saveLeaseUnlocked(lease));
+}
+
+export async function refreshLeaseMaterializationUnlocked(
   root: string,
   session: LocalSession,
   file: MaterializedFile,
 ): Promise<void> {
-  await withLeaseLock(root, async () => {
-    let lease: MaterializationLease;
-    try {
-      lease = await loadLease(root);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-      throw error;
-    }
-    const index = lease.paths.findIndex((entry) => entry.path === file.path);
-    if (index === -1) return;
-    if (
-      lease.server !== session.server ||
-      lease.userId !== session.user.id ||
-      lease.sessionId !== sessionId(session)
-    ) {
-      throw new Error("materialized file belongs to a different session; run `rolegit lock` first");
-    }
-    lease.paths[index] = normalizeMaterializedFile(file);
-    lease.expiresAt = session.expiresAt;
-    await writePrivateJson(leasePath(root), lease);
-  });
+  let lease: MaterializationLease;
+  try {
+    lease = await loadLease(root);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  const index = lease.paths.findIndex((entry) => entry.path === file.path);
+  if (index === -1) return;
+  if (
+    lease.server !== session.server ||
+    lease.userId !== session.user.id ||
+    lease.sessionId !== sessionId(session)
+  ) {
+    throw new Error("materialized file belongs to a different session; run `rolegit lock` first");
+  }
+  lease.paths[index] = normalizeMaterializedFile(file);
+  lease.expiresAt = session.expiresAt;
+  await writePrivateJson(leasePath(root), lease);
+}
+
+export function refreshLeaseMaterialization(
+  root: string,
+  session: LocalSession,
+  file: MaterializedFile,
+): Promise<void> {
+  return withRepositoryLock(root, () => refreshLeaseMaterializationUnlocked(root, session, file));
 }
 
 export async function loadLease(root: string): Promise<MaterializationLease> {

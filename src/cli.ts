@@ -119,7 +119,7 @@ async function main(): Promise<void> {
   }
   if (command === "status") {
     if (args.length > 0) throw new Error("status does not accept arguments");
-    await printStatus(policy.authServer);
+    await printStatus(root, policy.authServer);
     return;
   }
   if (command === "seal") {

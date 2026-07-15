@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -21,7 +21,7 @@ import {
   unlock,
 } from "../src/commands.js";
 import { atomicWrite, materializationDigest } from "../src/files.js";
-import { loadEnclist } from "../src/policy.js";
+import { loadEnclist, saveEnclist } from "../src/policy.js";
 import {
   deleteSession,
   loadLease,
@@ -117,6 +117,40 @@ test("protect, seal, lock, and unlock workflow", async (context) => {
   await rm(path.join(root, ".env"));
   await assert.rejects(() => stat(path.join(root, ".env")), { code: "ENOENT" });
 
+  const originalFetch = globalThis.fetch;
+  context.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  let releaseUnwrap!: () => void;
+  const unwrapReleased = new Promise<void>((resolve) => {
+    releaseUnwrap = resolve;
+  });
+  let markUnwrapStarted!: () => void;
+  const unwrapStarted = new Promise<void>((resolve) => {
+    markUnwrapStarted = resolve;
+  });
+  globalThis.fetch = async (input, init) => {
+    if (new URL(String(input)).pathname === "/v1/keys/unwrap") {
+      markUnwrapStarted();
+      await unwrapReleased;
+    }
+    return originalFetch(input, init);
+  };
+  const concurrentUnlock = unlock(root, []);
+  await unwrapStarted;
+  let lockFinished = false;
+  const concurrentLock = lock(root).then(() => {
+    lockFinished = true;
+  });
+  await delay(25);
+  assert.equal(lockFinished, false);
+  releaseUnwrap();
+  await Promise.all([concurrentUnlock, concurrentLock]);
+  globalThis.fetch = originalFetch;
+  await assert.rejects(() => stat(path.join(root, ".env")), { code: "ENOENT" });
+  await assert.rejects(() => loadLease(root), { code: "ENOENT" });
+
+  await login(root, authServer, 101);
   await unlock(root, []);
   assert.equal(await readFile(path.join(root, ".env"), "utf8"), "SECRET=workflow-value\n");
   if (process.platform !== "win32") {
@@ -146,11 +180,11 @@ test("lock and failed unlock preserve plaintext without a lease", async () => {
   await writeFile(path.join(root, ".env"), "SECRET=user-owned\n");
   await protect(root, ".env");
   const session = localSession("http://127.0.0.1:8787", 101, "no-lease-token");
-  await saveSession(session);
+  await saveSession(root, session);
 
   await assert.rejects(() => lock(root), /remote logout failed/);
   assert.equal(await readFile(path.join(root, ".env"), "utf8"), "SECRET=user-owned\n");
-  await assert.rejects(() => loadSession(session.server), /run `rolegit login` first/);
+  await assert.rejects(() => loadSession(root, session.server), /run `rolegit login` first/);
   await assert.rejects(() => unlock(root, []), /run `rolegit login` first/);
   assert.equal(await readFile(path.join(root, ".env"), "utf8"), "SECRET=user-owned\n");
 });
@@ -163,7 +197,7 @@ test("lock rejects a lease path outside the repository without deleting it", asy
   process.env.ROLEGIT_HOME = home;
   const session = localSession("http://127.0.0.1:8787", 101, "traversal-token");
   await initialize(root, session.server);
-  await saveSession(session);
+  await saveSession(root, session);
   const outside = path.join(parent, "outside");
   await writeFile(outside, "keep me\n");
   await saveLease(leaseFor(root, session, []));
@@ -183,7 +217,7 @@ test("lock rejects a lease path outside the repository without deleting it", asy
 
   await assert.rejects(() => lock(root), /lock completed with errors/);
   assert.equal(await readFile(outside, "utf8"), "keep me\n");
-  await assert.rejects(() => loadSession(session.server), /run `rolegit login` first/);
+  await assert.rejects(() => loadSession(root, session.server), /run `rolegit login` first/);
 });
 
 test("lock preserves changed files but cleans other paths and the session", async () => {
@@ -193,7 +227,7 @@ test("lock preserves changed files but cleans other paths and the session", asyn
   const original = Buffer.from("original\n");
   const paths = ["dirty.env", "replaced.env", "clean.env"];
   for (const entry of paths) await writeFile(path.join(root, entry), original);
-  await saveSession(session);
+  await saveSession(root, session);
   await saveLease(leaseFor(root, session, paths.map((entry) => ({
     path: entry,
     digest: materializationDigest(original),
@@ -206,7 +240,7 @@ test("lock preserves changed files but cleans other paths and the session", asyn
   assert.equal(await readFile(path.join(root, "dirty.env"), "utf8"), "unsaved edit\n");
   assert.ok((await stat(path.join(root, "replaced.env"))).isDirectory());
   await assert.rejects(() => stat(path.join(root, "clean.env")), { code: "ENOENT" });
-  await assert.rejects(() => loadSession(session.server), /run `rolegit login` first/);
+  await assert.rejects(() => loadSession(root, session.server), /run `rolegit login` first/);
   await assert.rejects(() => loadLease(root), { code: "ENOENT" });
 });
 
@@ -226,10 +260,10 @@ test("expiry cleanup does not extend a lease across sessions or delete changed f
     () => saveLease(leaseFor(root, bob, [])),
     /different session/,
   );
-  await saveSession(alice);
-  await assert.rejects(() => saveSession(bob), /run `rolegit lock` before logging in again/);
-  await deleteSession(alice.server);
-  await saveSession(bob);
+  await saveSession(root, alice);
+  await assert.rejects(() => saveSession(root, bob), /run `rolegit lock` before logging in again/);
+  await deleteSession(root, alice.server);
+  await saveSession(root, bob);
   await writeFile(path.join(root, "dirty.env"), "unsaved edit\n");
   await rm(path.join(root, "replaced.env"));
   await mkdir(path.join(root, "replaced.env"));
@@ -242,7 +276,7 @@ test("expiry cleanup does not extend a lease across sessions or delete changed f
   assert.ok((await stat(path.join(root, "replaced.env"))).isDirectory());
   await assert.rejects(() => stat(path.join(root, "clean.env")), { code: "ENOENT" });
   await assert.rejects(() => loadLease(root), { code: "ENOENT" });
-  assert.equal((await loadSession(bob.server)).user.id, bob.user.id);
+  assert.equal((await loadSession(root, bob.server)).user.id, bob.user.id);
 });
 
 test("stale watcher leaves a replacement session lease and materialization intact", async () => {
@@ -282,7 +316,7 @@ test("unlock cleans an unchanged lease after offline session expiry", async () =
   const plaintext = Buffer.from("expired materialization\n");
   await initialize(root, session.server);
   await writeFile(path.join(root, ".env"), plaintext);
-  await saveSession(session);
+  await saveSession(root, session);
   await saveLease(leaseFor(root, session, [{
     path: ".env",
     digest: materializationDigest(plaintext),
@@ -291,7 +325,7 @@ test("unlock cleans an unchanged lease after offline session expiry", async () =
   await assert.rejects(() => unlock(root, []), /RoleGit session expired/);
   await assert.rejects(() => stat(path.join(root, ".env")), { code: "ENOENT" });
   await assert.rejects(() => loadLease(root), { code: "ENOENT" });
-  await assert.rejects(() => loadSession(session.server), /run `rolegit login` first/);
+  await assert.rejects(() => loadSession(root, session.server), /run `rolegit login` first/);
 });
 
 test("concurrent same-session lease updates retain every materialized path", async () => {
@@ -361,11 +395,11 @@ test("lock uses repository metadata after enclist removal", async (context) => {
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const session = localSession(url, 101, "repository-session-token");
   await initialize(root, url);
-  await saveSession(session);
+  await saveSession(root, session);
   await rm(path.join(root, ".enclist"));
 
   await lock(root);
-  await assert.rejects(() => loadSession(url), /run `rolegit login` first/);
+  await assert.rejects(() => loadSession(root, url), /run `rolegit login` first/);
 });
 
 test("lock reports remote logout failure after deleting the local session", async (context) => {
@@ -381,10 +415,10 @@ test("lock reports remote logout failure after deleting the local session", asyn
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const session = localSession(url, 101, "failed-logout-token");
   await initialize(root, url);
-  await saveSession(session);
+  await saveSession(root, session);
 
   await assert.rejects(() => lock(root), /remote logout failed: logout unavailable/);
-  await assert.rejects(() => loadSession(url), /run `rolegit login` first/);
+  await assert.rejects(() => loadSession(root, url), /run `rolegit login` first/);
 });
 
 test("expiry watcher chunks delays above the Node timer limit", () => {
@@ -392,4 +426,167 @@ test("expiry watcher chunks delays above the Node timer limit", () => {
   const longExpiry = new Date(now + 30 * 24 * 60 * 60 * 1_000).toISOString();
   assert.equal(expiryWatcherDelay(longExpiry, now), 2_147_483_647);
   assert.throws(() => expiryWatcherDelay("not-a-date", now), /invalid expiry watcher expiration/);
+});
+
+test("a killed lock owner is reclaimed without blocking cleanup", async (context) => {
+  const root = await mkdtemp(path.join(tmpdir(), "rolegit-killed-lock-"));
+  const home = path.join(root, ".test-home");
+  process.env.ROLEGIT_HOME = home;
+  const moduleUrl = new URL("../src/session.js", import.meta.url).href;
+  const script = `
+    import { withRepositoryLock } from ${JSON.stringify(moduleUrl)};
+    await withRepositoryLock(process.env.CHILD_ROOT, async () => {
+      process.stdout.write("locked");
+      await new Promise(() => setInterval(() => undefined, 1_000));
+    });
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "--eval", script], {
+    env: { ...process.env, CHILD_ROOT: root, ROLEGIT_HOME: home },
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+  context.after(() => child.kill("SIGKILL"));
+  await once(child.stdout!, "data");
+  child.kill("SIGKILL");
+  await once(child, "exit");
+
+  const session = localSession("http://127.0.0.1:8787", 101, "reclaimed-lock-token");
+  await saveLease(leaseFor(root, session, []));
+  assert.equal((await loadLease(root)).sessionId, sessionId(session));
+});
+
+test("concurrent logins keep one local session and revoke the losing token", async (context) => {
+  const root = await mkdtemp(path.join(tmpdir(), "rolegit-concurrent-login-"));
+  process.env.ROLEGIT_HOME = path.join(root, ".test-home");
+  let issued = 0;
+  const revoked: string[] = [];
+  const server = createServer((request, response) => {
+    if (request.url === "/v1/auth/development") {
+      issued += 1;
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        session: {
+          token: `login-token-${issued}`,
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          user: { id: 101, login: "concurrent-user" },
+        },
+      }));
+      return;
+    }
+    revoked.push(request.headers.authorization ?? "");
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end("{}");
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  context.after(() => server.close());
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  const results = await Promise.allSettled([
+    login(root, url, 101),
+    login(root, url, 101),
+  ]);
+  assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(results.filter((result) => result.status === "rejected").length, 1);
+  assert.equal(revoked.length, 1);
+  const winner = await loadSession(root, url);
+  assert.notEqual(revoked[0], `Bearer ${winner.token}`);
+});
+
+test("expired-session cleanup cannot delete a concurrent replacement", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "rolegit-session-transition-"));
+  process.env.ROLEGIT_HOME = path.join(root, ".test-home");
+  const server = "http://127.0.0.1:8787";
+  const expired = localSession(server, 101, "expired-race-token", new Date(Date.now() - 1_000).toISOString());
+  const replacement = localSession(server, 101, "replacement-race-token");
+  await saveSession(root, expired);
+
+  await Promise.allSettled([
+    loadSession(root, server),
+    saveSession(root, replacement),
+  ]);
+  assert.equal((await loadSession(root, server)).token, replacement.token);
+});
+
+test("login updates an association, and later checkout changes cannot redirect lock", async (context) => {
+  const root = await mkdtemp(path.join(tmpdir(), "rolegit-server-change-"));
+  process.env.ROLEGIT_HOME = path.join(root, ".test-home");
+  let firstLogouts = 0;
+  let secondLogouts = 0;
+  const first = createServer((_request, response) => {
+    firstLogouts += 1;
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end("{}");
+  });
+  const second = createServer((request, response) => {
+    if (request.url === "/v1/auth/development") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        session: {
+          token: "second-server-token",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          user: { id: 101, login: "server-change-user" },
+        },
+      }));
+      return;
+    }
+    secondLogouts += 1;
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end("{}");
+  });
+  first.listen(0, "127.0.0.1");
+  second.listen(0, "127.0.0.1");
+  await Promise.all([once(first, "listening"), once(second, "listening")]);
+  context.after(() => first.close());
+  context.after(() => second.close());
+  const firstUrl = `http://127.0.0.1:${(first.address() as AddressInfo).port}`;
+  const secondUrl = `http://127.0.0.1:${(second.address() as AddressInfo).port}`;
+  await initialize(root, firstUrl);
+  const policy = await loadEnclist(root);
+  policy.authServer = secondUrl;
+  await saveEnclist(root, policy);
+  await login(root, secondUrl, 101);
+  policy.authServer = firstUrl;
+  await saveEnclist(root, policy);
+
+  await lock(root);
+  assert.equal(firstLogouts, 0);
+  assert.equal(secondLogouts, 1);
+  await assert.rejects(() => loadSession(root, secondUrl), /run `rolegit login` first/);
+});
+
+test("repository-scoped lock leaves another repository session and lease intact", async (context) => {
+  const parent = await mkdtemp(path.join(tmpdir(), "rolegit-repository-sessions-"));
+  process.env.ROLEGIT_HOME = path.join(parent, ".test-home");
+  const firstRoot = path.join(parent, "first");
+  const secondRoot = path.join(parent, "second");
+  await Promise.all([mkdir(firstRoot), mkdir(secondRoot)]);
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end("{}");
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  context.after(() => server.close());
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const firstSession = localSession(url, 101, "first-repository-token");
+  const secondSession = localSession(url, 101, "second-repository-token");
+  const plaintext = Buffer.from("shared server\n");
+  await Promise.all([
+    initialize(firstRoot, url),
+    initialize(secondRoot, url),
+    writeFile(path.join(firstRoot, ".env"), plaintext),
+    writeFile(path.join(secondRoot, ".env"), plaintext),
+  ]);
+  await Promise.all([
+    saveSession(firstRoot, firstSession),
+    saveSession(secondRoot, secondSession),
+    saveLease(leaseFor(firstRoot, firstSession, [{ path: ".env", digest: materializationDigest(plaintext) }])),
+    saveLease(leaseFor(secondRoot, secondSession, [{ path: ".env", digest: materializationDigest(plaintext) }])),
+  ]);
+
+  await lock(firstRoot);
+  await assert.rejects(() => stat(path.join(firstRoot, ".env")), { code: "ENOENT" });
+  assert.equal(await readFile(path.join(secondRoot, ".env"), "utf8"), plaintext.toString("utf8"));
+  assert.equal((await loadSession(secondRoot, url)).token, secondSession.token);
+  assert.equal((await loadLease(secondRoot)).sessionId, sessionId(secondSession));
 });

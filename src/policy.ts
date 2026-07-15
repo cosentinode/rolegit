@@ -67,10 +67,11 @@ export function parseEnclist(value: unknown): Enclist {
   const files: Record<string, EnclistFile> = {};
   for (const [rawPath, rawFile] of Object.entries(rawFiles)) {
     const protectedPath = normalizeProtectedPath(rawPath);
+    if (files[protectedPath]) throw new Error(`duplicate protected path: ${protectedPath}`);
     const file = object(rawFile, `files.${protectedPath}`);
     const objectPath = normalizeProtectedPath(string(file.object, `files.${protectedPath}.object`));
-    if (!objectPath.startsWith(".rolegit/vault/")) {
-      throw new Error(`encrypted object for ${protectedPath} must be inside .rolegit/vault`);
+    if (objectPath !== encryptedObjectPath(protectedPath)) {
+      throw new Error(`encrypted object for ${protectedPath} must use its canonical vault path`);
     }
     files[protectedPath] = { object: objectPath };
   }
@@ -97,7 +98,8 @@ export async function saveEnclist(root: string, policy: Enclist): Promise<void> 
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  await atomicWrite(policyPath, Buffer.from(`${JSON.stringify(policy, null, 2)}\n`), 0o644);
+  const validated = parseEnclist(policy);
+  await atomicWrite(policyPath, Buffer.from(`${JSON.stringify(validated, null, 2)}\n`), 0o644);
 }
 
 function parseTeam(value: unknown, label: string): TeamRule {

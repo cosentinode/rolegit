@@ -21,6 +21,22 @@ test("encrypted object paths are deterministic and opaque", () => {
   assert.equal(objectPath, encryptedObjectPath(".env.production"));
 });
 
+test("enclist rejects encrypted object aliases", () => {
+  const sharedObject = encryptedObjectPath("a.env");
+  assert.throws(
+    () => parseEnclist({
+      version: 1,
+      vaultId: "vault",
+      authServer: "http://127.0.0.1:8787",
+      files: {
+        "a.env": { object: sharedObject },
+        "b.env": { object: sharedObject },
+      },
+    }),
+    /canonical vault path/,
+  );
+});
+
 test("enclist only permits loopback HTTP", () => {
   const base = { version: 1, vaultId: "vault", files: {} };
   assert.doesNotThrow(() => parseEnclist({ ...base, authServer: "http://127.0.0.1:8787" }));
