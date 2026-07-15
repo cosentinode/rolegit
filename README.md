@@ -133,7 +133,9 @@ no files are unlocked. It reports remote logout failures; the remote token then 
 until its fixed expiry. `unlock` reserves cleanup ownership before creating each plaintext path, and a
 failed partial unlock retains ownership for any rollback failure. RoleGit preserves any materialized
 path that was modified or replaced after the latest successful `unlock` or `seal` rather than risking
-data loss. Explicit `lock` reports those paths and relinquishes its cleanup lease; failed automatic
+data loss. On POSIX systems, lease reservations fsync both their file and containing state directory
+before plaintext creation, and plaintext creation/removal fsyncs its containing directory. Explicit
+`lock` reports changed paths and relinquishes its cleanup lease; failed automatic
 expiry cleanup retains the lease so a new identity cannot log in until the path is resolved or
 explicitly locked. Local sessions are repository-scoped even when repositories use the same
 authorization server, so `lock` invalidates only the current repository's token. A new login cannot
@@ -144,7 +146,10 @@ modified paths.
 RoleGit stores a checkout UUID in Git's private metadata so local cleanup ownership survives moving
 or renaming the checkout without being committed. The UUID is bound to one machine-local checkout
 directory by persisted device/inode identity, so aliases to that directory retain access while a
-distinct copy fails closed before accessing sessions, leases, or plaintext. Leases and their expiry
+distinct copy fails closed before accessing sessions, leases, or plaintext. Missing markers and
+alternate active Git directories recover the registry identity for that filesystem instance;
+conflicting registered identities fail with cleanup instructions instead of opening a new state
+namespace. Leases and their expiry
 watchers also carry a unique generation so an older watcher cannot clean or alter failure state for a
 replacement lease. Successful cleanup atomically replaces the lease with a completed-generation
 tombstone, preventing a late watcher from recreating a failure after `lock`; repeated unlock attempts

@@ -34,7 +34,15 @@ error updates can clear or replace only their own generation, so overlapping sta
 erase a newer failure. Cleanup writes a terminal tombstone for the completed generation; a watcher
 can record an error only while that exact generation is still active, so a process starting after
 successful lock is a no-op. Repeated unlock attempts retain the current watched generation, including
-when partial materialization rolls back and the command reports failure.
+when partial materialization rolls back and the command reports failure. Checkout identity is also
+recovered from machine-local device/inode registry metadata when the private Git marker is missing or
+the active Git directory changes; multiple registry identities for one instance fail closed.
+
+Before plaintext creation on POSIX, RoleGit fsyncs the reserved lease file, atomically renames it, and
+fsyncs the state directory. Plaintext creation and removal likewise fsync their containing directory,
+so cleanup ownership is committed first across abrupt process or power loss. Node does not expose a
+portable Windows directory-flush primitive; Windows keeps file-handle fsync plus strict state-before-
+plaintext ordering, but its power-loss durability for directory entries depends on the filesystem.
 
 On POSIX systems, RoleGit creates local sessions, leases, and materialized files with owner-only
 mode bits. Node's numeric mode options do not enforce an equivalent private ACL on Windows; Windows

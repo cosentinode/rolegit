@@ -290,8 +290,31 @@ export async function assertSingleLinkPath(root: string, relativePath: string): 
   }
 }
 
+export async function syncDirectory(directory: string): Promise<void> {
+  if (process.platform === "win32") return;
+  const handle = await open(directory, "r");
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+export async function ensureDurableDirectory(directory: string): Promise<void> {
+  const resolved = path.resolve(directory);
+  const firstCreated = await mkdir(resolved, { recursive: true, mode: 0o700 });
+  if (firstCreated === undefined || process.platform === "win32") return;
+  let current = path.resolve(firstCreated);
+  await syncDirectory(path.dirname(current));
+  for (const segment of path.relative(current, resolved).split(path.sep).filter(Boolean)) {
+    current = path.join(current, segment);
+    await syncDirectory(path.dirname(current));
+  }
+}
+
 export async function atomicWrite(destination: string, data: Buffer, mode: number): Promise<void> {
-  await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+  const directory = path.dirname(destination);
+  await ensureDurableDirectory(directory);
   const temporary = `${destination}.rolegit-${process.pid}-${Date.now()}.tmp`;
   let handle;
   try {
@@ -301,6 +324,7 @@ export async function atomicWrite(destination: string, data: Buffer, mode: numbe
     await handle.close();
     handle = undefined;
     await rename(temporary, destination);
+    await syncDirectory(directory);
   } catch (error) {
     await handle?.close().catch(() => undefined);
     await rm(temporary, { force: true }).catch(() => undefined);
@@ -320,7 +344,8 @@ export async function writeMaterializedFile(
   const normalized = normalizePlaintextPath(relativePath);
   await assertNoSymlinkPath(root, normalized);
   const destination = path.join(root, normalized);
-  await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+  const directory = path.dirname(destination);
+  await ensureDurableDirectory(directory);
   let handle;
   try {
     handle = await open(destination, "wx", 0o600);
@@ -328,6 +353,7 @@ export async function writeMaterializedFile(
     await handle.sync();
     await handle.close();
     handle = undefined;
+    await syncDirectory(directory);
   } catch (error) {
     await handle?.close().catch(() => undefined);
     if (handle) await rm(destination, { force: true }).catch(() => undefined);
@@ -364,4 +390,5 @@ export async function removeMaterializedFile(root: string, file: MaterializedFil
     content.fill(0);
   }
   await rm(destination);
+  await syncDirectory(path.dirname(destination));
 }

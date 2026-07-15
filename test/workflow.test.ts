@@ -88,6 +88,12 @@ function operationLockPath(root: string, home: string): string {
   return path.join(home, "leases", `${id}.json.operation.lock`);
 }
 
+function instanceLockPath(root: string, home: string): string {
+  const instance = repositoryInstance(root);
+  const id = createHash("sha256").update(`${instance.device}\0${instance.inode}`).digest("hex");
+  return path.join(home, "repositories", "instances", `${id}.lock`);
+}
+
 function spawnTestProcess(
   context: TestContext,
   script: string,
@@ -736,6 +742,51 @@ test("concurrent lock and lease extension cannot orphan plaintext", async (conte
   }
 });
 
+test("a killed materialization process leaves durable cleanup ownership", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-crash-reservation-");
+  process.env.ROLEGIT_HOME = `${root}-home`;
+  const plaintext = Buffer.from("crash-owned materialization\n");
+  const generation = randomUUID();
+  const moduleUrl = new URL("../src/session.js", import.meta.url).href;
+  const filesUrl = new URL("../src/files.js", import.meta.url).href;
+  const child = spawnTestProcess(context, `
+    import { materializationDigest, writeMaterializedFile } from ${JSON.stringify(filesUrl)};
+    import { repositoryId, repositoryInstance, saveLease } from ${JSON.stringify(moduleUrl)};
+    const plaintext = Buffer.from(process.env.CHILD_PLAINTEXT, "utf8");
+    const file = { path: "crash.env", digest: materializationDigest(plaintext) };
+    await saveLease({
+      version: 1,
+      repositoryId: repositoryId(process.env.CHILD_ROOT),
+      repositoryInstance: repositoryInstance(process.env.CHILD_ROOT),
+      generation: process.env.CHILD_GENERATION,
+      root: process.env.CHILD_ROOT,
+      server: "http://127.0.0.1:8787",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      userId: 101,
+      sessionId: "a".repeat(64),
+      paths: [file],
+    });
+    await writeMaterializedFile(process.env.CHILD_ROOT, file.path, plaintext);
+    process.stdout.write("ready\\n");
+    await new Promise(() => {});
+  `, {
+    CHILD_GENERATION: generation,
+    CHILD_PLAINTEXT: plaintext.toString("utf8"),
+    CHILD_ROOT: root,
+    ROLEGIT_HOME: process.env.ROLEGIT_HOME,
+  });
+  await child.ready;
+  child.child.kill("SIGKILL");
+  assert.equal(await child.exit, null);
+  assert.equal(child.child.signalCode, "SIGKILL");
+  assert.equal((await loadLease(root)).generation, generation);
+  assert.equal(await readFile(path.join(root, "crash.env"), "utf8"), plaintext.toString("utf8"));
+
+  await lock(root, false);
+  await assert.rejects(() => stat(path.join(root, "crash.env")), { code: "ENOENT" });
+  await assert.rejects(() => loadLease(root), { code: "ENOENT" });
+});
+
 test("concurrent initializers serialize across processes", async (context) => {
   const root = await temporaryDirectory(context, "rolegit-concurrent-init-");
   const home = `${root}-home`;
@@ -887,6 +938,7 @@ test("a killed lock owner fails closed for every concurrent waiter", async (cont
   );
   assert.equal(results.every((result) =>
     result.status === "rejected" && /stale state lock/.test(String(result.reason))), true);
+  await rm(instanceLockPath(root, home));
   await rm(operationLockPath(root, home));
   await saveLease(leaseFor(root, session, []));
   assert.equal((await loadLease(root)).sessionId, sessionId(session));
@@ -1252,6 +1304,122 @@ test("moving a checkout preserves cleanup ownership", async (context) => {
   await assert.rejects(() => stat(path.join(movedRoot, ".env")), { code: "ENOENT" });
   await assert.rejects(() => loadSession(movedRoot, url), /run `rolegit login` first/);
   await assert.rejects(() => loadLease(movedRoot), { code: "ENOENT" });
+});
+
+test("missing checkout marker recovers the registered active identity", async (context) => {
+  const parent = await temporaryDirectory(context, "rolegit-missing-checkout-marker-");
+  const root = path.join(parent, "repository");
+  process.env.ROLEGIT_HOME = path.join(parent, ".test-home");
+  await mkdir(root);
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  let logouts = 0;
+  const server = createServer((_request, response) => {
+    logouts += 1;
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end("{}");
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  context.after(() => server.close());
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const session = localSession(url, 101, "missing-marker-token");
+  const plaintext = Buffer.from("missing marker materialization\n");
+  await initialize(root, url);
+  await saveSession(root, session);
+  await writeFile(path.join(root, ".env"), plaintext);
+  await saveLease(leaseFor(root, session, [{ path: ".env", digest: materializationDigest(plaintext) }]));
+  const identity = repositoryId(root);
+  await rm(path.join(root, ".git", "rolegit-id"));
+
+  await lock(root);
+  assert.equal(logouts, 1);
+  assert.equal(repositoryId(root), identity);
+  assert.equal((await readFile(path.join(root, ".git", "rolegit-id"), "utf8")).trim(), identity);
+  await assert.rejects(() => stat(path.join(root, ".env")), { code: "ENOENT" });
+  await assert.rejects(() => loadLease(root), { code: "ENOENT" });
+  await assert.rejects(() => loadSession(root, url), /run `rolegit login` first/);
+});
+
+test("alternate Git context cannot rotate an active checkout identity", async (context) => {
+  const parent = await temporaryDirectory(context, "rolegit-alternate-git-context-");
+  const root = path.join(parent, "repository");
+  const alternateGit = path.join(parent, "alternate.git");
+  process.env.ROLEGIT_HOME = path.join(parent, ".test-home");
+  await mkdir(root);
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  execFileSync("git", ["init", "--bare", "--quiet", alternateGit]);
+  const server = "http://127.0.0.1:8787";
+  const session = localSession(server, 101, "alternate-git-context-token");
+  const plaintext = Buffer.from("alternate Git context materialization\n");
+  await initialize(root, server);
+  await saveSession(root, session);
+  await writeFile(path.join(root, ".env"), plaintext);
+  const lease = leaseFor(root, session, [{ path: ".env", digest: materializationDigest(plaintext) }]);
+  await saveLease(lease);
+  const identity = repositoryId(root);
+
+  const moduleUrl = new URL("../src/commands.js", import.meta.url).href;
+  const child = spawnTestProcess(context, `
+    import { lock } from ${JSON.stringify(moduleUrl)};
+    process.stdout.write("ready\\n");
+    await lock(process.env.CHILD_ROOT, false);
+  `, {
+    CHILD_ROOT: root,
+    GIT_DIR: alternateGit,
+    GIT_WORK_TREE: root,
+    ROLEGIT_HOME: process.env.ROLEGIT_HOME,
+  });
+  await child.ready;
+  assert.equal(await child.exit, 0, child.stderr());
+  assert.equal(repositoryId(root), identity);
+  assert.equal((await readFile(path.join(alternateGit, "rolegit-id"), "utf8")).trim(), identity);
+  await assert.rejects(() => stat(path.join(root, ".env")), { code: "ENOENT" });
+  await assert.rejects(() => loadLease(root), { code: "ENOENT" });
+  assert.equal((await loadSession(root, server)).token, session.token);
+  await deleteSession(root, server);
+});
+
+test("conflicting alternate Git identity cannot consume active state", async (context) => {
+  const parent = await temporaryDirectory(context, "rolegit-conflicting-git-context-");
+  const root = path.join(parent, "repository");
+  const alternateGit = path.join(parent, "alternate.git");
+  process.env.ROLEGIT_HOME = path.join(parent, ".test-home");
+  await mkdir(root);
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  execFileSync("git", ["init", "--bare", "--quiet", alternateGit]);
+  const server = "http://127.0.0.1:8787";
+  const session = localSession(server, 101, "conflicting-git-context-token");
+  const plaintext = Buffer.from("conflicting Git context materialization\n");
+  await initialize(root, server);
+  await saveSession(root, session);
+  await writeFile(path.join(root, ".env"), plaintext);
+  const lease = leaseFor(root, session, [{ path: ".env", digest: materializationDigest(plaintext) }]);
+  await saveLease(lease);
+  const identity = repositoryId(root);
+  const conflictingIdentity = randomUUID();
+  await writeFile(path.join(alternateGit, "rolegit-id"), `${conflictingIdentity}\n`);
+
+  const moduleUrl = new URL("../src/commands.js", import.meta.url).href;
+  const child = spawnTestProcess(context, `
+    import { lock } from ${JSON.stringify(moduleUrl)};
+    process.stdout.write("ready\\n");
+    await lock(process.env.CHILD_ROOT, false);
+  `, {
+    CHILD_ROOT: root,
+    GIT_DIR: alternateGit,
+    GIT_WORK_TREE: root,
+    ROLEGIT_HOME: process.env.ROLEGIT_HOME,
+  });
+  await child.ready;
+  assert.equal(await child.exit, 1);
+  assert.match(child.stderr(), /active Git checkout identity.*conflicts with registered identity/);
+  assert.equal(repositoryId(root), identity);
+  assert.equal((await readFile(path.join(alternateGit, "rolegit-id"), "utf8")).trim(), conflictingIdentity);
+  assert.equal(await readFile(path.join(root, ".env"), "utf8"), plaintext.toString("utf8"));
+  assert.equal((await loadLease(root)).generation, lease.generation);
+  assert.equal((await loadSession(root, server)).token, session.token);
+  await lock(root, false);
+  await deleteSession(root, server);
 });
 
 test("a checkout path alias retains cleanup ownership", async (context) => {

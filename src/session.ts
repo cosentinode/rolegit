@@ -2,10 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat } from "node:fs/promises";
-import { mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { gitMetadataPaths } from "./files.js";
+import { ensureDurableDirectory, gitMetadataPaths, syncDirectory } from "./files.js";
 import { normalizePlaintextPath, portablePathKey } from "./paths.js";
 import type { LocalSession, MaterializationLease, MaterializedFile, RepositoryInstance } from "./types.js";
 
@@ -58,6 +58,69 @@ function pathNamesEqual(first: string, second: string): boolean {
     : first === second;
 }
 
+function registeredRepositoryIds(root: string): string[] {
+  const instance = repositoryInstance(root);
+  const directory = path.join(roleGitHome(), "repositories");
+  let entries;
+  try {
+    entries = readdirSync(directory, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const identities = new Set<string>();
+  for (const entry of entries) {
+    if (!entry.name.endsWith(".json")) continue;
+    const source = path.join(directory, entry.name);
+    const sourceStat = lstatSync(source);
+    if (sourceStat.isSymbolicLink() || !sourceStat.isFile()) {
+      throw new Error("refusing non-regular repository session metadata");
+    }
+    const parsed = JSON.parse(readFileSync(source, "utf8")) as Partial<RepositoryMetadata>;
+    if (
+      typeof parsed.repositoryId !== "string" ||
+      !(/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(parsed.repositoryId) || /^[a-f0-9]{64}$/.test(parsed.repositoryId)) ||
+      typeof parsed.repositoryInstance?.device !== "string" ||
+      !/^\d+$/.test(parsed.repositoryInstance.device) ||
+      typeof parsed.repositoryInstance.inode !== "string" ||
+      !/^\d+$/.test(parsed.repositoryInstance.inode) ||
+      typeof parsed.root !== "string" || !path.isAbsolute(parsed.root) ||
+      !Array.isArray(parsed.servers) ||
+      !parsed.servers.every((server) => typeof server === "string")
+    ) throw new Error("invalid repository session metadata");
+    if (repositoryInstancesEqual(parsed.repositoryInstance as RepositoryInstance, instance)) {
+      identities.add(parsed.repositoryId);
+    }
+  }
+  return [...identities];
+}
+
+function readCheckoutMarker(marker: string): string | undefined {
+  try {
+    const markerStat = lstatSync(marker);
+    if (markerStat.isSymbolicLink() || !markerStat.isFile()) {
+      throw new Error("refusing non-regular RoleGit checkout identity");
+    }
+    const value = readFileSync(marker, "utf8").trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(value)) throw new Error("invalid RoleGit checkout identity");
+    return value;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function writeCheckoutMarker(marker: string, identity: string): void {
+  mkdirSync(path.dirname(marker), { recursive: true, mode: 0o700 });
+  const existing = readCheckoutMarker(marker);
+  if (existing !== undefined) return;
+  try {
+    writeFileSync(marker, `${identity}\n`, { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+}
+
 export function repositoryId(root: string): string {
   let marker: string;
   try {
@@ -78,24 +141,31 @@ export function repositoryId(root: string): string {
   } catch {
     return createHash("sha256").update(path.resolve(root)).digest("hex");
   }
-  try {
-    const value = readFileSync(marker, "utf8").trim();
-    if (!/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(value)) throw new Error("invalid RoleGit checkout identity");
-    return value;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  const markerIdentity = readCheckoutMarker(marker);
+  const registered = registeredRepositoryIds(root);
+  if (registered.length > 1) {
+    throw new Error(
+      `multiple RoleGit checkout identities are registered for ${path.resolve(root)}; ` +
+      `inspect ${path.join(roleGitHome(), "repositories")} and restore one binding before running \`rolegit lock\``,
+    );
   }
-  mkdirSync(path.dirname(marker), { recursive: true, mode: 0o700 });
+  const registeredIdentity = registered[0];
+  if (registeredIdentity !== undefined) {
+    if (markerIdentity !== undefined && markerIdentity !== registeredIdentity) {
+      throw new Error(
+        `active Git checkout identity ${markerIdentity} conflicts with registered identity ${registeredIdentity}; ` +
+        "restore the intended Git context and run `rolegit lock` before changing checkout identity",
+      );
+    }
+    if (!/^[a-f0-9]{64}$/.test(registeredIdentity) && markerIdentity === undefined) {
+      writeCheckoutMarker(marker, registeredIdentity);
+    }
+    return registeredIdentity;
+  }
+  if (markerIdentity !== undefined) return markerIdentity;
   const value = randomUUID();
-  try {
-    writeFileSync(marker, `${value}\n`, { flag: "wx", mode: 0o600 });
-    return value;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    const existing = readFileSync(marker, "utf8").trim();
-    if (!/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(existing)) throw new Error("invalid RoleGit checkout identity");
-    return existing;
-  }
+  writeCheckoutMarker(marker, value);
+  return readCheckoutMarker(marker)!;
 }
 
 function repositoryInstanceAtResolvedRoot(root: string): RepositoryInstance {
@@ -132,6 +202,11 @@ function leasePath(root: string): string {
 
 function repositoryOperationLockPath(repositoryIdentity: string): string {
   return `${leasePathForId(repositoryIdentity)}.operation.lock`;
+}
+
+function repositoryInstanceLockPath(instance: RepositoryInstance): string {
+  const id = createHash("sha256").update(`${instance.device}\0${instance.inode}`).digest("hex");
+  return path.join(roleGitHome(), "repositories", "instances", `${id}.lock`);
 }
 
 function repositoryPathForId(repositoryIdentity: string): string {
@@ -174,7 +249,8 @@ interface CompletedLease {
 }
 
 async function writePrivateJson(destination: string, value: unknown): Promise<void> {
-  await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+  const directory = path.dirname(destination);
+  await ensureDurableDirectory(directory);
   const temporary = `${destination}.${process.pid}.tmp`;
   const handle = await open(temporary, "wx", 0o600);
   try {
@@ -182,6 +258,7 @@ async function writePrivateJson(destination: string, value: unknown): Promise<vo
     await handle.sync();
     await handle.close();
     await rename(temporary, destination);
+    await syncDirectory(directory);
   } catch (error) {
     await handle.close().catch(() => undefined);
     await rm(temporary, { force: true }).catch(() => undefined);
@@ -261,35 +338,41 @@ export function withRepositoryLock<T>(root: string, operation: () => Promise<T>)
   if (roleGitMetadataPath(root) !== undefined) {
     return Promise.reject(new Error("ROLEGIT_HOME must be outside the repository worktree"));
   }
-  const id = repositoryId(root);
-  return withStateLock(repositoryOperationLockPath(id), async () => {
-    const currentRoot = await realpath(root);
-    const currentInstance = repositoryInstance(currentRoot);
-    let metadata: RepositoryMetadata;
-    try {
-      metadata = await loadRepositoryMetadata(root);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      metadata = { repositoryId: id, repositoryInstance: currentInstance, root: currentRoot, servers: [] };
-      await writePrivateJson(repositoryPath(root), metadata);
-    }
-    if (!repositoryInstancesEqual(metadata.repositoryInstance, currentInstance)) {
-      throw new Error(
-        `duplicate RoleGit checkout identity does not match the registered filesystem instance at ${metadata.root}; ` +
-        "do not use copied checkouts until one has a new identity",
-      );
-    }
-    if (!pathNamesEqual(metadata.root, currentRoot)) {
-      await writePrivateJson(repositoryPath(root), { ...metadata, root: currentRoot });
-    }
-    try {
-      for (const failure of (await loadExpiryCleanupErrors(id)).failures) {
-        console.error(`warning: previous expiry cleanup failed: ${failure.message}`);
+  const initialInstance = repositoryInstance(root);
+  return withStateLock(repositoryInstanceLockPath(initialInstance), async () => {
+    const id = repositoryId(root);
+    return withStateLock(repositoryOperationLockPath(id), async () => {
+      const currentRoot = await realpath(root);
+      const currentInstance = repositoryInstance(currentRoot);
+      if (!repositoryInstancesEqual(initialInstance, currentInstance)) {
+        throw new Error("repository root changed while acquiring its state lock");
       }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-    return operation();
+      let metadata: RepositoryMetadata;
+      try {
+        metadata = await loadRepositoryMetadata(root);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        metadata = { repositoryId: id, repositoryInstance: currentInstance, root: currentRoot, servers: [] };
+        await writePrivateJson(repositoryPath(root), metadata);
+      }
+      if (!repositoryInstancesEqual(metadata.repositoryInstance, currentInstance)) {
+        throw new Error(
+          `duplicate RoleGit checkout identity does not match the registered filesystem instance at ${metadata.root}; ` +
+          "do not use copied checkouts until one has a new identity",
+        );
+      }
+      if (!pathNamesEqual(metadata.root, currentRoot)) {
+        await writePrivateJson(repositoryPath(root), { ...metadata, root: currentRoot });
+      }
+      try {
+        for (const failure of (await loadExpiryCleanupErrors(id)).failures) {
+          console.error(`warning: previous expiry cleanup failed: ${failure.message}`);
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      return operation();
+    });
   });
 }
 
@@ -419,7 +502,6 @@ export async function resolveRepositoryRoot(repositoryIdentity: string): Promise
       .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
       .map((entry) => path.join(parent, entry.name))];
     for (const candidate of candidates) {
-      if (existingCheckoutId(candidate) !== repositoryIdentity) continue;
       let resolved: string;
       let instance: RepositoryInstance;
       try {
@@ -429,9 +511,11 @@ export async function resolveRepositoryRoot(repositoryIdentity: string): Promise
         if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
         throw error;
       }
+      const instanceMatches = repositoryInstancesEqual(metadata.repositoryInstance, instance);
+      if (!instanceMatches && existingCheckoutId(candidate) !== repositoryIdentity) continue;
       if (!identityInstances.some((entry) => pathNamesEqual(entry, resolved))) identityInstances.push(resolved);
       if (
-        repositoryInstancesEqual(metadata.repositoryInstance, instance) &&
+        instanceMatches &&
         !matchingInstances.some((entry) => pathNamesEqual(entry, resolved))
       ) matchingInstances.push(resolved);
     }
