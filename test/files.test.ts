@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 
-import { initialize, protect } from "../src/commands.js";
+import { initialize, protect, seal } from "../src/commands.js";
 import {
   atomicWrite,
   gitPathExistsInHistory,
@@ -15,6 +15,7 @@ import {
   removeMaterializedFile,
 } from "../src/files.js";
 import { encryptedObjectPath, loadEnclist } from "../src/policy.js";
+import { saveSession } from "../src/session.js";
 
 async function temporaryDirectory(context: TestContext, prefix: string): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), prefix));
@@ -96,6 +97,56 @@ test("protect rejects existing worktree aliases and ignores future portable alia
     cwd: root,
     stdio: "ignore",
   }));
+});
+
+test("protect rejects Unicode portable aliases and ignores future equivalents", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-unicode-case-alias-");
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  await initialize(root, "http://127.0.0.1:8787");
+  await writeFile(path.join(root, "\u03A3.env"), "SECRET=existing-unicode-alias\n");
+  await assert.rejects(() => protect(root, "\u03C2.env"), /differs only by case from existing path/);
+
+  await rm(path.join(root, "\u03A3.env"));
+  await protect(root, "\u03A3.env");
+  await writeFile(path.join(root, "\u03C2.env"), "SECRET=future-unicode-alias\n");
+  execFileSync("git", ["check-ignore", "--quiet", "--", "\u03C2.env"], { cwd: root });
+  execFileSync("git", ["add", "."], { cwd: root });
+  assert.throws(() => execFileSync("git", ["ls-files", "--error-unmatch", "--", "\u03C2.env"], {
+    cwd: root,
+    stdio: "ignore",
+  }));
+});
+
+test("protect, seal, and cleanup reject multiply-linked plaintext", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-hard-link-");
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  execFileSync("git", ["config", "user.email", "test@rolegit.local"], { cwd: root });
+  execFileSync("git", ["config", "user.name", "RoleGit Test"], { cwd: root });
+  await writeFile(path.join(root, "tracked.env"), "SECRET=tracked-hard-link\n");
+  execFileSync("git", ["add", "tracked.env"], { cwd: root });
+  execFileSync("git", ["commit", "--quiet", "-m", "track hard-link target"], { cwd: root });
+  await link(path.join(root, "tracked.env"), path.join(root, "secret.env"));
+  await initialize(root, "http://127.0.0.1:8787");
+
+  await assert.rejects(() => protect(root, "secret.env"), /multiply-linked plaintext path/);
+  await rm(path.join(root, "secret.env"));
+  const plaintext = Buffer.from("SECRET=standalone-before-link\n");
+  await writeFile(path.join(root, "secret.env"), plaintext);
+  await protect(root, "secret.env");
+  await link(path.join(root, "secret.env"), path.join(root, "alias.env"));
+  await saveSession(root, {
+    server: "http://127.0.0.1:8787",
+    token: "hard-link-token",
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    user: { id: 101, login: "hard-link-user" },
+  });
+
+  await assert.rejects(() => seal(root, ["secret.env"]), /multiply-linked plaintext path/);
+  await assert.rejects(
+    () => removeMaterializedFile(root, { path: "secret.env", digest: materializationDigest(plaintext) }),
+    /multiply-linked materialized path/,
+  );
+  assert.equal(await readFile(path.join(root, "tracked.env"), "utf8"), "SECRET=tracked-hard-link\n");
 });
 
 test("protect rejects portable RoleGit and Git metadata namespaces", async (context) => {

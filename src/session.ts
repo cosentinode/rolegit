@@ -6,7 +6,7 @@ import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { gitMetadataPath } from "./files.js";
-import { normalizePlaintextPath } from "./paths.js";
+import { normalizePlaintextPath, portablePathKey } from "./paths.js";
 import type { LocalSession, MaterializationLease, MaterializedFile } from "./types.js";
 
 function roleGitHome(): string {
@@ -38,7 +38,7 @@ export function roleGitMetadataPath(root: string): string | undefined {
 
 function pathNamesEqual(first: string, second: string): boolean {
   return process.platform === "win32"
-    ? first.toLowerCase() === second.toLowerCase()
+    ? portablePathKey(first) === portablePathKey(second)
     : first === second;
 }
 
@@ -410,8 +410,8 @@ function normalizeMaterializedFile(value: unknown, root?: string): MaterializedF
     ? []
     : [gitMetadataPath(root), roleGitMetadataPath(root)]
       .filter((entry): entry is string => entry !== undefined)
-      .map((entry) => entry.toLowerCase());
-  const portablePath = protectedPath.toLowerCase();
+      .map(portablePathKey);
+  const portablePath = portablePathKey(protectedPath);
   if (metadataPaths.some((metadataPath) =>
     metadataPath === "." || portablePath === metadataPath || portablePath.startsWith(`${metadataPath}/`))) {
     throw new Error("materialization lease cannot contain repository metadata");

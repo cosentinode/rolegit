@@ -11,7 +11,7 @@ import type {
   TeamRule,
 } from "./types.js";
 import { atomicWrite, gitMetadataPath } from "./files.js";
-import { normalizePlaintextPath, normalizeProtectedPath } from "./paths.js";
+import { normalizePlaintextPath, normalizeProtectedPath, portablePathKey } from "./paths.js";
 import { roleGitMetadataPath } from "./session.js";
 
 export { normalizePlaintextPath, normalizeProtectedPath } from "./paths.js";
@@ -70,7 +70,7 @@ export function parseEnclist(value: unknown): Enclist {
   for (const [rawPath, rawFile] of Object.entries(rawFiles)) {
     const protectedPath = normalizePlaintextPath(rawPath);
     if (Object.hasOwn(files, protectedPath)) throw new Error(`duplicate protected path: ${protectedPath}`);
-    const portablePath = protectedPath.toLowerCase();
+    const portablePath = portablePathKey(protectedPath);
     const alias = portablePaths.get(portablePath);
     if (alias !== undefined && alias !== protectedPath) {
       throw new Error(`protected paths differ only by case: ${alias}, ${protectedPath}`);
@@ -89,9 +89,9 @@ export function parseEnclist(value: unknown): Enclist {
 function assertNoRepositoryMetadataFiles(root: string, policy: Enclist): void {
   const metadataPaths = [gitMetadataPath(root), roleGitMetadataPath(root)]
     .filter((entry): entry is string => entry !== undefined)
-    .map((entry) => entry.toLowerCase());
+    .map(portablePathKey);
   for (const protectedPath of Object.keys(policy.files)) {
-    const portablePath = protectedPath.toLowerCase();
+    const portablePath = portablePathKey(protectedPath);
     if (metadataPaths.some((metadataPath) =>
       metadataPath === "." || portablePath === metadataPath || portablePath.startsWith(`${metadataPath}/`))) {
       throw new Error(`repository metadata cannot be protected: ${protectedPath}`);
@@ -160,7 +160,7 @@ export function parseServerPolicy(value: unknown): ServerPolicy {
     for (const [rawPath, rawRule] of Object.entries(rawFiles)) {
       const protectedPath = normalizePlaintextPath(rawPath);
       if (Object.hasOwn(files, protectedPath)) throw new Error(`duplicate protected path: ${protectedPath}`);
-      const portablePath = protectedPath.toLowerCase();
+      const portablePath = portablePathKey(protectedPath);
       const alias = portablePaths.get(portablePath);
       if (alias !== undefined && alias !== protectedPath) {
         throw new Error(`protected paths differ only by case: ${alias}, ${protectedPath}`);

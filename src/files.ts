@@ -4,7 +4,7 @@ import { lstatSync, realpathSync } from "node:fs";
 import { lstat, mkdir, open, readFile, readdir, rename, rm } from "node:fs/promises";
 import path from "node:path";
 
-import { normalizePlaintextPath } from "./paths.js";
+import { normalizePlaintextPath, portablePathKey } from "./paths.js";
 import type { MaterializedFile } from "./types.js";
 
 export function repositoryRoot(cwd = process.cwd()): string {
@@ -76,7 +76,7 @@ export async function existingPortablePathAlias(root: string, relativePath: stri
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
       throw error;
     }
-    const matches = entries.filter((entry) => entry.toLowerCase() === component.toLowerCase());
+    const matches = entries.filter((entry) => portablePathKey(entry) === portablePathKey(component));
     const alias = matches.find((entry) => entry !== component);
     if (alias !== undefined) return [...actual, alias, ...components.slice(actual.length + 1)].join("/");
     if (!matches.includes(component)) return undefined;
@@ -141,20 +141,71 @@ export async function appendGitIgnore(root: string, relativePath: string): Promi
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  const escapedPath = Array.from(relativePath, (character) => {
-    if (character === "/") return character;
-    const variants = [...new Set([character, character.toLowerCase(), character.toUpperCase()])];
-    if (variants.length > 1 && variants.every((variant) => Array.from(variant).length === 1)) {
-      return `[${variants.map((variant) => variant.replaceAll(/([\\\]\-^])/g, "\\$1")).join("")}]`;
-    }
-    return character.replaceAll(/([\\*?\[\]!#])/g, "\\$1");
-  }).join("");
-  const lines = [`/${escapedPath}`, `/${escapedPath}.rolegit-*.tmp`];
+  const alternatives = portableIgnoreAlternatives(relativePath);
+  const lines = alternatives.flatMap((escapedPath) => [`/${escapedPath}`, `/${escapedPath}.rolegit-*.tmp`]);
   const existing = new Set(content.split(/\r?\n/));
   const additions = lines.filter((line) => !existing.has(line));
   if (additions.length === 0) return;
   const separator = content.length > 0 && !content.endsWith("\n") ? "\n" : "";
   await atomicWrite(ignorePath, Buffer.from(`${content}${separator}${additions.join("\n")}\n`), 0o644);
+}
+
+let portableCaseVariants: Map<string, string[]> | undefined;
+
+function caseVariants(): Map<string, string[]> {
+  if (portableCaseVariants) return portableCaseVariants;
+  // Git wildmatch classes are byte-oriented for non-ASCII, so collect aliases for complete patterns.
+  portableCaseVariants = new Map<string, string[]>();
+  for (let codePoint = 0; codePoint <= 0x10ffff; codePoint += 1) {
+    if (codePoint >= 0xd800 && codePoint <= 0xdfff) continue;
+    const character = String.fromCodePoint(codePoint);
+    const upper = character.toUpperCase();
+    const folded = Array.from(upper).length === 1 ? upper.toLowerCase() : character;
+    if (
+      character.normalize("NFC") === character &&
+      upper === character &&
+      folded === character
+    ) continue;
+    const key = portablePathKey(character);
+    if (Array.from(key).length !== 1) continue;
+    const variants = portableCaseVariants.get(key) ?? [];
+    variants.push(character);
+    portableCaseVariants.set(key, variants);
+  }
+  return portableCaseVariants;
+}
+
+function escapeIgnoreLiteral(value: string): string {
+  return value.replaceAll(/([\\*?\[\]!#])/g, "\\$1");
+}
+
+function portableIgnoreAlternatives(relativePath: string): string[] {
+  const classes = caseVariants();
+  let alternatives = [""];
+  for (const character of relativePath) {
+    if (character === "/") {
+      alternatives = alternatives.map((entry) => `${entry}/`);
+      continue;
+    }
+    const variants = classes.get(portablePathKey(character)) ?? [character];
+    const ascii = variants.filter((variant) => /^[\x00-\x7f]$/.test(variant));
+    const unicode = variants.filter((variant) => !/^[\x00-\x7f]$/.test(variant));
+    const choices = [
+      ...(ascii.length > 1
+        ? [`[${ascii.map((variant) => variant.replaceAll(/([\\\]\-^])/g, "\\$1")).join("")}]`]
+        : ascii.map(escapeIgnoreLiteral)),
+      ...unicode.map(escapeIgnoreLiteral),
+    ];
+    if (alternatives.length * choices.length > 1024) {
+      throw new Error(`protected path has too many portable Unicode case aliases: ${relativePath}`);
+    }
+    alternatives = alternatives.flatMap((entry) => choices.map((choice) => `${entry}${choice}`));
+  }
+  const normalized = [...new Set(alternatives.flatMap((entry) => [entry.normalize("NFC"), entry.normalize("NFD")]))];
+  if (normalized.length > 1024) {
+    throw new Error(`protected path has too many portable Unicode case aliases: ${relativePath}`);
+  }
+  return normalized;
 }
 
 export async function assertNoSymlinkPath(root: string, relativePath: string): Promise<void> {
@@ -169,6 +220,18 @@ export async function assertNoSymlinkPath(root: string, relativePath: string): P
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
       throw error;
     }
+  }
+}
+
+export async function assertSingleLinkPath(root: string, relativePath: string): Promise<void> {
+  try {
+    const pathStat = await lstat(path.join(root, relativePath));
+    if (pathStat.isFile() && pathStat.nlink > 1) {
+      throw new Error(`refusing multiply-linked plaintext path: ${relativePath}`);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
   }
 }
 
@@ -233,6 +296,9 @@ export async function removeMaterializedFile(root: string, file: MaterializedFil
   }
   if (!destinationStat.isFile()) {
     throw new Error(`refusing to remove changed materialized path ${normalized}`);
+  }
+  if (destinationStat.nlink > 1) {
+    throw new Error(`refusing to remove multiply-linked materialized path ${normalized}`);
   }
   const content = await readFile(destination);
   try {

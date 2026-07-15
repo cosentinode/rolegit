@@ -156,8 +156,12 @@ no RoleGit process is active before removing it.
 
 - Exact protected paths; Git-ignore-style patterns are planned.
 - Protected paths reject Windows device names, alternate-data-stream syntax, trailing dots/spaces,
-  `.gitignore`, Git/RoleGit metadata namespaces, and policy/Git/worktree entries that differ only by
-  case. Generated ignore rules cover portable case aliases under ordinary Git behavior. Filenames
+  `.gitignore`, Git/RoleGit metadata namespaces, multiply-linked files, and portable
+  policy/Git/worktree aliases. Unicode collision keys use NFC and locale-independent,
+  one-code-point uppercase/lowercase folding; generated ignore rules expand the same aliases.
+  Multi-character case mappings and paths requiring more than 1,024 ignore alternatives are
+  rejected. Node does not expose the active Windows filesystem case table, so this is a conservative
+  Unicode approximation rather than a guarantee of every OS-version-specific equivalence. Filenames
   such as `__proto__` and `constructor` remain valid user paths.
 - Server state and sessions are in memory and disappear on restart.
 - The key-encryption key comes from `ROLEGIT_KEK`; production KMS integration is not implemented.

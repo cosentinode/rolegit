@@ -58,6 +58,36 @@ test("rejects non-portable Windows paths and case aliases", () => {
       },
     },
   }), /differ only by case/);
+  assert.throws(() => normalizeProtectedPath("Stra\u00DFe.env"), /multi-character Unicode case mapping/);
+  assert.throws(() => normalizeProtectedPath("e\u0301.env"), /NFC Unicode normalization/);
+});
+
+test("policies reject Unicode Windows case equivalents", () => {
+  const capitalSigma = "\u03A3.env";
+  const finalSigma = "\u03C2.env";
+  assert.throws(() => parseEnclist({
+    version: 1,
+    vaultId: "vault",
+    authServer: "http://127.0.0.1:8787",
+    files: {
+      [capitalSigma]: { object: encryptedObjectPath(capitalSigma) },
+      [finalSigma]: { object: encryptedObjectPath(finalSigma) },
+    },
+  }), /differ only by case/);
+  assert.throws(() => parseServerPolicy({
+    version: 1,
+    sessionMinutes: 60,
+    keyId: "dev",
+    vaults: {
+      vault: {
+        repository: "acme/project",
+        files: {
+          [capitalSigma]: { users: [101], teams: [] },
+          [finalSigma]: { users: [202], teams: [] },
+        },
+      },
+    },
+  }), /differ only by case/);
 });
 
 test("encrypted object paths are deterministic and opaque", () => {

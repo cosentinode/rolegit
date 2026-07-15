@@ -6,6 +6,7 @@ import { decryptFile, encryptFile, parseEncryptedFile } from "./crypto.js";
 import { decodeBase64Url } from "./encoding.js";
 import {
   appendGitIgnore,
+  assertSingleLinkPath,
   assertNoSymlinkPath,
   atomicWrite,
   gitPathIsIgnored,
@@ -24,6 +25,7 @@ import {
   normalizePlaintextPath,
   saveEnclist,
 } from "./policy.js";
+import { portablePathKey } from "./paths.js";
 import {
   deleteLeaseUnlocked,
   deleteSessionUnlocked,
@@ -66,17 +68,17 @@ export function initialize(root: string, authServer: string): Promise<void> {
 async function protectUnlocked(root: string, inputPath: string): Promise<void> {
   const relativeInput = path.isAbsolute(inputPath) ? path.relative(root, inputPath) : inputPath;
   const protectedPath = normalizePlaintextPath(relativeInput);
-  const portablePath = protectedPath.toLowerCase();
+  const portablePath = portablePathKey(protectedPath);
   const metadataNamespaces = [gitMetadataPath(root), roleGitMetadataPath(root)]
     .filter((entry): entry is string => entry !== undefined)
-    .map((entry) => entry.toLowerCase());
+    .map(portablePathKey);
   if (metadataNamespaces.some((entry) =>
     entry === "." || portablePath === entry || portablePath.startsWith(`${entry}/`))) {
     throw new Error("RoleGit metadata cannot be protected");
   }
   const policy = await loadEnclist(root);
   const caseAlias = Object.keys(policy.files).find((entry) =>
-    entry !== protectedPath && entry.toLowerCase() === protectedPath.toLowerCase());
+    entry !== protectedPath && portablePathKey(entry) === portablePathKey(protectedPath));
   if (caseAlias) throw new Error(`${protectedPath} differs only by case from protected path ${caseAlias}`);
   if (gitPathIsTracked(root, protectedPath)) {
     throw new Error(`${protectedPath} is already tracked; remove it from Git history before protecting it`);
@@ -87,6 +89,7 @@ async function protectUnlocked(root: string, inputPath: string): Promise<void> {
   const filesystemAlias = await existingPortablePathAlias(root, protectedPath);
   if (filesystemAlias) throw new Error(`${protectedPath} differs only by case from existing path ${filesystemAlias}`);
   await assertNoSymlinkPath(root, protectedPath);
+  await assertSingleLinkPath(root, protectedPath);
   await appendGitIgnore(root, protectedPath);
   if (!gitPathIsIgnored(root, protectedPath)) {
     throw new Error(`failed to ignore plaintext path ${protectedPath}`);
@@ -192,6 +195,7 @@ async function sealUnlocked(root: string, requested: string[]): Promise<void> {
     const source = path.join(root, protectedPath);
     const sourceStat = await stat(source);
     if (!sourceStat.isFile()) throw new Error(`${protectedPath} is not a regular file`);
+    if (sourceStat.nlink > 1) throw new Error(`refusing multiply-linked plaintext path: ${protectedPath}`);
     if (sourceStat.size > MAX_FILE_SIZE) throw new Error(`${protectedPath} exceeds the 10 MiB limit`);
     const plaintext = await readFile(source);
     const keyResult = await client.dataKey(session, policy.vaultId, protectedPath);
