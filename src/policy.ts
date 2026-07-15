@@ -16,6 +16,7 @@ import { normalizeProtectedPath } from "./paths.js";
 export { normalizeProtectedPath } from "./paths.js";
 
 export const ENCLIST_NAME = ".enclist";
+export const MAX_SESSION_MINUTES = 365 * 24 * 60;
 
 function object(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -153,10 +154,14 @@ export function parseServerPolicy(value: unknown): ServerPolicy {
   if (githubClientId !== undefined && typeof githubClientId !== "string") {
     throw new Error("githubClientId must be a string");
   }
+  const sessionMinutes = positiveInteger(root.sessionMinutes ?? 60, "sessionMinutes");
+  if (sessionMinutes > MAX_SESSION_MINUTES) {
+    throw new Error(`sessionMinutes must not exceed ${MAX_SESSION_MINUTES}`);
+  }
   return {
     version: 1,
     ...(githubClientId === undefined ? {} : { githubClientId }),
-    sessionMinutes: positiveInteger(root.sessionMinutes ?? 60, "sessionMinutes"),
+    sessionMinutes,
     keyId: string(root.keyId, "keyId"),
     developmentUsers,
     vaults,

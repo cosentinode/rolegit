@@ -6,10 +6,20 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { once } from "node:events";
+import { createServer } from "node:http";
 import test from "node:test";
 
 import { createAuthServer } from "../src/auth-server.js";
-import { initialize, lock, lockIfSessionExpired, login, protect, seal, unlock } from "../src/commands.js";
+import {
+  expiryWatcherDelay,
+  initialize,
+  lock,
+  lockIfSessionExpired,
+  login,
+  protect,
+  seal,
+  unlock,
+} from "../src/commands.js";
 import { atomicWrite, materializationDigest } from "../src/files.js";
 import { loadEnclist } from "../src/policy.js";
 import {
@@ -87,7 +97,7 @@ test("protect, seal, lock, and unlock workflow", async (context) => {
     files: { ".env": { users: [101], teams: [] } },
   };
 
-  await login(authServer, 101);
+  await login(root, authServer, 101);
   if (process.platform !== "win32") {
     const outside = await mkdtemp(path.join(tmpdir(), "rolegit-object-symlink-"));
     await mkdir(path.join(root, ".rolegit"), { recursive: true });
@@ -138,7 +148,7 @@ test("lock and failed unlock preserve plaintext without a lease", async () => {
   const session = localSession("http://127.0.0.1:8787", 101, "no-lease-token");
   await saveSession(session);
 
-  await lock(root);
+  await assert.rejects(() => lock(root), /remote logout failed/);
   assert.equal(await readFile(path.join(root, ".env"), "utf8"), "SECRET=user-owned\n");
   await assert.rejects(() => loadSession(session.server), /run `rolegit login` first/);
   await assert.rejects(() => unlock(root, []), /run `rolegit login` first/);
@@ -282,4 +292,104 @@ test("unlock cleans an unchanged lease after offline session expiry", async () =
   await assert.rejects(() => stat(path.join(root, ".env")), { code: "ENOENT" });
   await assert.rejects(() => loadLease(root), { code: "ENOENT" });
   await assert.rejects(() => loadSession(session.server), /run `rolegit login` first/);
+});
+
+test("concurrent same-session lease updates retain every materialized path", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "rolegit-concurrent-lease-"));
+  process.env.ROLEGIT_HOME = path.join(root, ".test-home");
+  const session = localSession("http://127.0.0.1:8787", 101, "concurrent-token");
+  const first = { path: "first.env", digest: materializationDigest(Buffer.from("first\n")) };
+  const second = { path: "second.env", digest: materializationDigest(Buffer.from("second\n")) };
+
+  await Promise.all([
+    saveLease(leaseFor(root, session, [first])),
+    saveLease(leaseFor(root, session, [second])),
+  ]);
+
+  assert.deepEqual((await loadLease(root)).paths.map((file) => file.path).sort(), [
+    "first.env",
+    "second.env",
+  ]);
+});
+
+test("concurrent lock and lease extension cannot orphan plaintext", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "rolegit-concurrent-lock-"));
+  process.env.ROLEGIT_HOME = path.join(root, ".test-home");
+  const session = localSession("http://127.0.0.1:8787", 101, "concurrent-lock-token");
+  const original = Buffer.from("original\n");
+  const added = Buffer.from("added\n");
+  await writeFile(path.join(root, "original.env"), original);
+  await writeFile(path.join(root, "added.env"), added);
+  await saveLease(leaseFor(root, session, [{
+    path: "original.env",
+    digest: materializationDigest(original),
+  }]));
+
+  await Promise.all([
+    lock(root, false),
+    saveLease(leaseFor(root, session, [{
+      path: "added.env",
+      digest: materializationDigest(added),
+    }])),
+  ]);
+
+  await assert.rejects(() => stat(path.join(root, "original.env")), { code: "ENOENT" });
+  let addedExists = true;
+  try {
+    await stat(path.join(root, "added.env"));
+  } catch (error) {
+    assert.equal((error as NodeJS.ErrnoException).code, "ENOENT");
+    addedExists = false;
+  }
+  if (addedExists) {
+    assert.ok((await loadLease(root)).paths.some((file) => file.path === "added.env"));
+  } else {
+    await assert.rejects(() => loadLease(root), { code: "ENOENT" });
+  }
+});
+
+test("lock uses repository metadata after enclist removal", async (context) => {
+  const root = await mkdtemp(path.join(tmpdir(), "rolegit-repository-session-"));
+  process.env.ROLEGIT_HOME = path.join(root, ".test-home");
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end("{}");
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  context.after(() => server.close());
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const session = localSession(url, 101, "repository-session-token");
+  await initialize(root, url);
+  await saveSession(session);
+  await rm(path.join(root, ".enclist"));
+
+  await lock(root);
+  await assert.rejects(() => loadSession(url), /run `rolegit login` first/);
+});
+
+test("lock reports remote logout failure after deleting the local session", async (context) => {
+  const root = await mkdtemp(path.join(tmpdir(), "rolegit-failed-logout-"));
+  process.env.ROLEGIT_HOME = path.join(root, ".test-home");
+  const server = createServer((_request, response) => {
+    response.writeHead(503, { "content-type": "application/json" });
+    response.end(JSON.stringify({ error: "logout unavailable" }));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  context.after(() => server.close());
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const session = localSession(url, 101, "failed-logout-token");
+  await initialize(root, url);
+  await saveSession(session);
+
+  await assert.rejects(() => lock(root), /remote logout failed: logout unavailable/);
+  await assert.rejects(() => loadSession(url), /run `rolegit login` first/);
+});
+
+test("expiry watcher chunks delays above the Node timer limit", () => {
+  const now = Date.now();
+  const longExpiry = new Date(now + 30 * 24 * 60 * 60 * 1_000).toISOString();
+  assert.equal(expiryWatcherDelay(longExpiry, now), 2_147_483_647);
+  assert.throws(() => expiryWatcherDelay("not-a-date", now), /invalid expiry watcher expiration/);
 });

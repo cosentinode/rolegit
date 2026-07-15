@@ -26,17 +26,21 @@ import {
   deleteLease,
   deleteSession,
   loadLease,
+  loadRepositoryServer,
   loadSession,
   refreshLeaseMaterialization,
   saveLease,
+  saveRepositoryServer,
   saveSession,
   sessionId,
   sessionTimeRemaining,
+  withLeaseLock,
 } from "./session.js";
 import type { LocalSession, MaterializationLease, MaterializedFile } from "./types.js";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 const MAX_ENCRYPTED_FILE_SIZE = 4 * Math.ceil(MAX_FILE_SIZE / 3) + 64 * 1024;
+const MAX_TIMER_DELAY = 2_147_483_647;
 
 export async function initialize(root: string, authServer: string): Promise<void> {
   try {
@@ -46,6 +50,7 @@ export async function initialize(root: string, authServer: string): Promise<void
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   await saveEnclist(root, createEnclist(authServer));
+  await saveRepositoryServer(root, authServer);
   console.log("Created .enclist");
 }
 
@@ -100,23 +105,20 @@ async function cleanupMaterializedFiles(
 }
 
 async function cleanupLease(root: string, lease: MaterializationLease, log: boolean): Promise<Error[]> {
-  let current: MaterializationLease;
-  try {
-    current = await loadLease(root);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    return [error as Error];
-  }
-  if (current.sessionId !== lease.sessionId) return [];
+  return withLeaseLock(root, async () => {
+    let current: MaterializationLease;
+    try {
+      current = await loadLease(root);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      return [error as Error];
+    }
+    if (current.sessionId !== lease.sessionId) return [];
 
-  const failures = await cleanupMaterializedFiles(root, current.paths, log);
-  try {
-    const latest = await loadLease(root);
-    if (latest.sessionId === lease.sessionId) await deleteLease(root);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") failures.push(error as Error);
-  }
-  return failures;
+    const failures = await cleanupMaterializedFiles(root, current.paths, log);
+    await deleteLease(root).catch((error: unknown) => failures.push(error as Error));
+    return failures;
+  });
 }
 
 function throwWithCleanupFailures(error: unknown, failures: Error[]): never {
@@ -270,23 +272,48 @@ export async function lock(root: string, logout = true): Promise<void> {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") failures.push(error as Error);
   }
-  if (lease) failures.push(...await cleanupLease(root, lease, true));
+  if (lease) {
+    try {
+      failures.push(...await cleanupLease(root, lease, true));
+    } catch (error) {
+      failures.push(error as Error);
+    }
+  }
 
   if (logout) {
     let server = lease?.server;
     if (!server) {
       try {
         server = (await loadEnclist(root)).authServer;
+        await saveRepositoryServer(root, server);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") failures.push(error as Error);
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          failures.push(error as Error);
+        } else {
+          try {
+            server = await loadRepositoryServer(root);
+          } catch (repositoryError) {
+            failures.push(new Error(
+              `cannot determine authorization server: ${(repositoryError as Error).message}`,
+              { cause: repositoryError },
+            ));
+          }
+        }
       }
     }
     if (server) {
+      let session: LocalSession | undefined;
       try {
-        const session = await loadSession(server);
-        await new AuthClient(server).logout(session).catch(() => undefined);
+        session = await loadSession(server);
       } catch {
         // Invalid, expired, or missing local sessions still need deletion.
+      }
+      if (session) {
+        try {
+          await new AuthClient(server).logout(session);
+        } catch (error) {
+          failures.push(new Error(`remote logout failed: ${(error as Error).message}`, { cause: error }));
+        }
       }
       try {
         await deleteSession(server);
@@ -298,11 +325,17 @@ export async function lock(root: string, logout = true): Promise<void> {
   if (failures.length > 0) throw cleanupError("lock completed with errors", failures);
 }
 
+export function expiryWatcherDelay(expiresAt: string, now = Date.now()): number {
+  const expiration = new Date(expiresAt).getTime();
+  if (!Number.isFinite(expiration)) throw new Error("invalid expiry watcher expiration");
+  return Math.min(MAX_TIMER_DELAY, Math.max(0, expiration - now + 250));
+}
+
 export async function lockIfSessionExpired(root: string, expectedExpiry: string): Promise<void> {
   const watchedLease = await loadLease(root);
   let expiry = expectedExpiry;
   while (true) {
-    const delay = Math.max(0, new Date(expiry).getTime() - Date.now() + 250);
+    const delay = expiryWatcherDelay(expiry);
     await new Promise((resolve) => setTimeout(resolve, delay));
     let lease: MaterializationLease;
     try {
@@ -330,9 +363,11 @@ export async function lockIfSessionExpired(root: string, expectedExpiry: string)
 }
 
 export async function login(
+  root: string,
   server: string,
   developmentUser?: number,
 ): Promise<LocalSession> {
+  await saveRepositoryServer(root, server);
   const client = new AuthClient(server);
   let session: LocalSession;
   if (developmentUser !== undefined) {

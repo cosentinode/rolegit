@@ -20,6 +20,11 @@ function leasePath(root: string): string {
   return path.join(roleGitHome(), "leases", `${id}.json`);
 }
 
+function repositoryPath(root: string): string {
+  const id = createHash("sha256").update(path.resolve(root)).digest("hex");
+  return path.join(roleGitHome(), "repositories", `${id}.json`);
+}
+
 async function writePrivateJson(destination: string, value: unknown): Promise<void> {
   await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
   const temporary = `${destination}.${process.pid}.tmp`;
@@ -46,6 +51,23 @@ export async function saveSession(session: LocalSession): Promise<void> {
     if (!/no RoleGit session|RoleGit session expired/.test((error as Error).message)) throw error;
   }
   await writePrivateJson(sessionPath(session.server), session);
+}
+
+export async function saveRepositoryServer(root: string, server: string): Promise<void> {
+  await writePrivateJson(repositoryPath(root), { root: path.resolve(root), server });
+}
+
+export async function loadRepositoryServer(root: string): Promise<string> {
+  const source = repositoryPath(root);
+  const repositoryStat = await lstat(source);
+  if (repositoryStat.isSymbolicLink() || !repositoryStat.isFile()) {
+    throw new Error("refusing non-regular repository session metadata");
+  }
+  const parsed = JSON.parse(await readFile(source, "utf8")) as { root?: unknown; server?: unknown };
+  if (parsed.root !== path.resolve(root) || typeof parsed.server !== "string") {
+    throw new Error("invalid repository session metadata");
+  }
+  return parsed.server;
 }
 
 export async function loadSession(server: string): Promise<LocalSession> {
@@ -106,25 +128,48 @@ function normalizeMaterializedFile(value: unknown): MaterializedFile {
   return { path: normalizeProtectedPath(file.path), digest: file.digest! };
 }
 
-export async function saveLease(lease: MaterializationLease): Promise<void> {
-  let existing: MaterializationLease | undefined;
-  try {
-    existing = await loadLease(lease.root);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  if (existing) {
-    if (
-      existing.server !== lease.server ||
-      existing.userId !== lease.userId ||
-      existing.sessionId !== lease.sessionId
-    ) {
-      throw new Error("files are unlocked by a different session; run `rolegit lock` first");
+export async function withLeaseLock<T>(root: string, operation: () => Promise<T>): Promise<T> {
+  const destination = `${leasePath(root)}.lock`;
+  await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+  const deadline = Date.now() + 30_000;
+  let handle;
+  while (!handle) {
+    try {
+      handle = await open(destination, "wx", 0o600);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST" || Date.now() >= deadline) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 10));
     }
   }
-  const paths = new Map(existing?.paths.map((file) => [file.path, file]));
-  for (const file of lease.paths.map(normalizeMaterializedFile)) paths.set(file.path, file);
-  await writePrivateJson(leasePath(lease.root), { ...lease, paths: [...paths.values()] });
+  try {
+    return await operation();
+  } finally {
+    await handle.close().catch(() => undefined);
+    await rm(destination, { force: true });
+  }
+}
+
+export async function saveLease(lease: MaterializationLease): Promise<void> {
+  await withLeaseLock(lease.root, async () => {
+    let existing: MaterializationLease | undefined;
+    try {
+      existing = await loadLease(lease.root);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (existing) {
+      if (
+        existing.server !== lease.server ||
+        existing.userId !== lease.userId ||
+        existing.sessionId !== lease.sessionId
+      ) {
+        throw new Error("files are unlocked by a different session; run `rolegit lock` first");
+      }
+    }
+    const paths = new Map(existing?.paths.map((file) => [file.path, file]));
+    for (const file of lease.paths.map(normalizeMaterializedFile)) paths.set(file.path, file);
+    await writePrivateJson(leasePath(lease.root), { ...lease, paths: [...paths.values()] });
+  });
 }
 
 export async function refreshLeaseMaterialization(
@@ -132,25 +177,27 @@ export async function refreshLeaseMaterialization(
   session: LocalSession,
   file: MaterializedFile,
 ): Promise<void> {
-  let lease: MaterializationLease;
-  try {
-    lease = await loadLease(root);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw error;
-  }
-  const index = lease.paths.findIndex((entry) => entry.path === file.path);
-  if (index === -1) return;
-  if (
-    lease.server !== session.server ||
-    lease.userId !== session.user.id ||
-    lease.sessionId !== sessionId(session)
-  ) {
-    throw new Error("materialized file belongs to a different session; run `rolegit lock` first");
-  }
-  lease.paths[index] = normalizeMaterializedFile(file);
-  lease.expiresAt = session.expiresAt;
-  await writePrivateJson(leasePath(root), lease);
+  await withLeaseLock(root, async () => {
+    let lease: MaterializationLease;
+    try {
+      lease = await loadLease(root);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    const index = lease.paths.findIndex((entry) => entry.path === file.path);
+    if (index === -1) return;
+    if (
+      lease.server !== session.server ||
+      lease.userId !== session.user.id ||
+      lease.sessionId !== sessionId(session)
+    ) {
+      throw new Error("materialized file belongs to a different session; run `rolegit lock` first");
+    }
+    lease.paths[index] = normalizeMaterializedFile(file);
+    lease.expiresAt = session.expiresAt;
+    await writePrivateJson(leasePath(root), lease);
+  });
 }
 
 export async function loadLease(root: string): Promise<MaterializationLease> {

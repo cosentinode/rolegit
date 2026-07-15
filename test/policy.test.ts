@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  MAX_SESSION_MINUTES,
   encryptedObjectPath,
   normalizeProtectedPath,
   parseEnclist,
@@ -45,5 +46,17 @@ test("server policy requires explicit non-empty access rules", () => {
         },
       }),
     /authorize at least one/,
+  );
+});
+
+test("server policy caps representable session durations", () => {
+  assert.throws(
+    () => parseServerPolicy({
+      version: 1,
+      sessionMinutes: MAX_SESSION_MINUTES + 1,
+      keyId: "dev",
+      vaults: {},
+    }),
+    /must not exceed/,
   );
 });

@@ -91,6 +91,9 @@ export function createAuthServer(options: AuthServerOptions) {
   function issueSession(user: GitHubIdentity, githubToken?: string) {
     const token = encodeBase64Url(randomBytes(32));
     const expiresAt = Date.now() + options.policy.sessionMinutes * 60_000;
+    if (!Number.isFinite(new Date(expiresAt).getTime())) {
+      throw new Error("session expiration is outside the supported date range");
+    }
     const active: ActiveSession = {
       tokenHash: tokenHash(token),
       expiresAt,
@@ -128,14 +131,15 @@ export function createAuthServer(options: AuthServerOptions) {
     const membershipToken = options.githubApp && vault
       ? await options.githubApp.installationToken(vault.repository)
       : session.githubToken;
-    if (!membershipToken) throw new Error("user is not authorized for this file");
+    if (!membershipToken || !session.githubToken) throw new Error("user is not authorized for this file");
     for (const team of rule.teams) {
       if (
         await isActiveTeamMember(
+          session.githubToken,
           membershipToken,
           team.organization,
           team.slug,
-          session.user.login,
+          session.user,
         )
       ) return;
     }

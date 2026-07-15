@@ -114,7 +114,7 @@ async function main(): Promise<void> {
     if (developmentUser !== undefined && !Number.isSafeInteger(developmentUser)) {
       throw new Error("--development-user must be a numeric GitHub user ID");
     }
-    await login(policy.authServer, developmentUser);
+    await login(root, policy.authServer, developmentUser);
     return;
   }
   if (command === "status") {

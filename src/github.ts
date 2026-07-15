@@ -70,15 +70,18 @@ export function getGitHubIdentity(token: string): Promise<GitHubIdentity> {
 }
 
 export async function isActiveTeamMember(
-  token: string,
+  identityToken: string,
+  membershipToken: string,
   organization: string,
   slug: string,
-  login: string,
+  expectedUser: GitHubIdentity,
 ): Promise<boolean> {
-  const url = `https://api.github.com/orgs/${encodeURIComponent(organization)}/teams/${encodeURIComponent(slug)}/memberships/${encodeURIComponent(login)}`;
+  const currentUser = await getGitHubIdentity(identityToken);
+  if (currentUser.id !== expectedUser.id) return false;
+  const url = `https://api.github.com/orgs/${encodeURIComponent(organization)}/teams/${encodeURIComponent(slug)}/memberships/${encodeURIComponent(currentUser.login)}`;
   try {
     const membership = await githubRequest<{ state?: string }>(url, {
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${membershipToken}` },
     });
     return membership.state === "active";
   } catch (error) {
