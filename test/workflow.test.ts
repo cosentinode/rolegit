@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -589,4 +589,18 @@ test("repository-scoped lock leaves another repository session and lease intact"
   assert.equal(await readFile(path.join(secondRoot, ".env"), "utf8"), plaintext.toString("utf8"));
   assert.equal((await loadSession(secondRoot, url)).token, secondSession.token);
   assert.equal((await loadLease(secondRoot)).sessionId, sessionId(secondSession));
+});
+
+test("repository session access migrates legacy server-scoped credentials", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "rolegit-session-migration-"));
+  const home = path.join(root, ".test-home");
+  process.env.ROLEGIT_HOME = home;
+  const session = localSession("http://127.0.0.1:8787", 101, "legacy-session-token");
+  const legacyId = createHash("sha256").update(session.server).digest("hex");
+  const legacyPath = path.join(home, "sessions", `${legacyId}.json`);
+  await mkdir(path.dirname(legacyPath), { recursive: true });
+  await writeFile(legacyPath, `${JSON.stringify(session)}\n`);
+
+  assert.equal((await loadSession(root, session.server)).token, session.token);
+  await assert.rejects(() => stat(legacyPath), { code: "ENOENT" });
 });

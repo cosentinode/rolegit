@@ -15,6 +15,11 @@ function sessionPath(root: string, server: string): string {
   return path.join(roleGitHome(), "sessions", `${id}.json`);
 }
 
+function legacySessionPath(server: string): string {
+  const id = createHash("sha256").update(server).digest("hex");
+  return path.join(roleGitHome(), "sessions", `${id}.json`);
+}
+
 function leasePath(root: string): string {
   const id = createHash("sha256").update(path.resolve(root)).digest("hex");
   return path.join(roleGitHome(), "leases", `${id}.json`);
@@ -113,8 +118,28 @@ function withSessionLock<T>(root: string, server: string, operation: () => Promi
   return withStateLock(`${sessionPath(root, server)}.lock`, operation);
 }
 
+async function migrateLegacySession(root: string, server: string): Promise<void> {
+  try {
+    await lstat(sessionPath(root, server));
+    return;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  try {
+    const legacy = legacySessionPath(server);
+    const legacyStat = await lstat(legacy);
+    if (legacyStat.isSymbolicLink() || !legacyStat.isFile()) {
+      throw new Error("refusing non-regular legacy session file");
+    }
+    await rename(legacy, sessionPath(root, server));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
 export async function saveSession(root: string, session: LocalSession): Promise<void> {
   await withSessionLock(root, session.server, async () => {
+    await migrateLegacySession(root, session.server);
     try {
       const existing = await loadSessionUnlocked(root, session.server);
       if (sessionId(existing) !== sessionId(session)) {
@@ -180,7 +205,10 @@ async function loadSessionUnlocked(root: string, server: string): Promise<LocalS
 }
 
 export function loadSession(root: string, server: string): Promise<LocalSession> {
-  return withSessionLock(root, server, () => loadSessionUnlocked(root, server));
+  return withSessionLock(root, server, async () => {
+    await migrateLegacySession(root, server);
+    return loadSessionUnlocked(root, server);
+  });
 }
 
 export async function deleteSession(
@@ -189,6 +217,7 @@ export async function deleteSession(
   expectedSessionId?: string,
 ): Promise<void> {
   await withSessionLock(root, server, async () => {
+    await migrateLegacySession(root, server);
     if (expectedSessionId) {
       try {
         const current = await loadSessionUnlocked(root, server);
