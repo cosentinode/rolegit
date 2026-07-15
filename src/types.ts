@@ -64,9 +64,17 @@ export interface LocalSession {
   };
 }
 
+export interface MaterializedFile {
+  path: string;
+  digest: string;
+}
+
 export interface MaterializationLease {
+  version: 1;
   root: string;
   server: string;
   expiresAt: string;
-  paths: string[];
+  userId: number;
+  sessionId: string;
+  paths: MaterializedFile[];
 }

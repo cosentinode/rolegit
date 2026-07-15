@@ -4,7 +4,7 @@ import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import path from "node:path";
 
 import { normalizeProtectedPath } from "./paths.js";
-import type { LocalSession, MaterializationLease } from "./types.js";
+import type { LocalSession, MaterializationLease, MaterializedFile } from "./types.js";
 
 function roleGitHome(): string {
   return process.env.ROLEGIT_HOME ?? path.join(homedir(), ".config", "rolegit");
@@ -37,6 +37,14 @@ async function writePrivateJson(destination: string, value: unknown): Promise<vo
 }
 
 export async function saveSession(session: LocalSession): Promise<void> {
+  try {
+    const existing = await loadSession(session.server);
+    if (sessionId(existing) !== sessionId(session)) {
+      throw new Error("another session is active; run `rolegit lock` before logging in again");
+    }
+  } catch (error) {
+    if (!/no RoleGit session|RoleGit session expired/.test((error as Error).message)) throw error;
+  }
   await writePrivateJson(sessionPath(session.server), session);
 }
 
@@ -83,16 +91,66 @@ export function sessionTimeRemaining(session: LocalSession): number {
   return Math.max(0, new Date(session.expiresAt).getTime() - Date.now());
 }
 
+export function sessionId(session: LocalSession): string {
+  return createHash("sha256").update(session.token).digest("hex");
+}
+
+function normalizeMaterializedFile(value: unknown): MaterializedFile {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("invalid materialization lease");
+  }
+  const file = value as Partial<MaterializedFile>;
+  if (typeof file.path !== "string" || !/^[a-f0-9]{64}$/.test(file.digest ?? "")) {
+    throw new Error("invalid materialization lease");
+  }
+  return { path: normalizeProtectedPath(file.path), digest: file.digest! };
+}
+
 export async function saveLease(lease: MaterializationLease): Promise<void> {
-  let paths = lease.paths;
-  const existing = await loadLease(lease.root).catch(() => undefined);
-  if (existing && existing.server !== lease.server) {
-    throw new Error("authorization server changed while files are unlocked; run `rolegit lock` first");
+  let existing: MaterializationLease | undefined;
+  try {
+    existing = await loadLease(lease.root);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   if (existing) {
-    paths = [...new Set([...existing.paths, ...paths])];
+    if (
+      existing.server !== lease.server ||
+      existing.userId !== lease.userId ||
+      existing.sessionId !== lease.sessionId
+    ) {
+      throw new Error("files are unlocked by a different session; run `rolegit lock` first");
+    }
   }
-  await writePrivateJson(leasePath(lease.root), { ...lease, paths });
+  const paths = new Map(existing?.paths.map((file) => [file.path, file]));
+  for (const file of lease.paths.map(normalizeMaterializedFile)) paths.set(file.path, file);
+  await writePrivateJson(leasePath(lease.root), { ...lease, paths: [...paths.values()] });
+}
+
+export async function refreshLeaseMaterialization(
+  root: string,
+  session: LocalSession,
+  file: MaterializedFile,
+): Promise<void> {
+  let lease: MaterializationLease;
+  try {
+    lease = await loadLease(root);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  const index = lease.paths.findIndex((entry) => entry.path === file.path);
+  if (index === -1) return;
+  if (
+    lease.server !== session.server ||
+    lease.userId !== session.user.id ||
+    lease.sessionId !== sessionId(session)
+  ) {
+    throw new Error("materialized file belongs to a different session; run `rolegit lock` first");
+  }
+  lease.paths[index] = normalizeMaterializedFile(file);
+  lease.expiresAt = session.expiresAt;
+  await writePrivateJson(leasePath(root), lease);
 }
 
 export async function loadLease(root: string): Promise<MaterializationLease> {
@@ -105,13 +163,20 @@ export async function loadLease(root: string): Promise<MaterializationLease> {
   if (typeof parsed !== "object" || parsed === null) throw new Error("invalid materialization lease");
   const lease = parsed as Partial<MaterializationLease>;
   if (
+    lease.version !== 1 ||
     lease.root !== path.resolve(root) ||
     typeof lease.server !== "string" ||
     typeof lease.expiresAt !== "string" ||
+    !Number.isSafeInteger(lease.userId) ||
+    (lease.userId ?? 0) <= 0 ||
+    !/^[a-f0-9]{64}$/.test(lease.sessionId ?? "") ||
     !Array.isArray(lease.paths) ||
-    !lease.paths.every((entry) => typeof entry === "string")
+    !Number.isFinite(new Date(lease.expiresAt).getTime())
   ) throw new Error("invalid materialization lease");
-  return { ...(lease as MaterializationLease), paths: lease.paths.map(normalizeProtectedPath) };
+  return {
+    ...(lease as MaterializationLease),
+    paths: lease.paths.map(normalizeMaterializedFile),
+  };
 }
 
 export async function deleteLease(root: string): Promise<void> {

@@ -11,7 +11,9 @@ import {
   gitPathIsIgnored,
   gitPathExistsInHistory,
   gitPathIsTracked,
+  materializationDigest,
   removeMaterializedFile,
+  writeMaterializedFile,
 } from "./files.js";
 import {
   createEnclist,
@@ -25,11 +27,13 @@ import {
   deleteSession,
   loadLease,
   loadSession,
+  refreshLeaseMaterialization,
   saveLease,
   saveSession,
+  sessionId,
   sessionTimeRemaining,
 } from "./session.js";
-import type { LocalSession } from "./types.js";
+import type { LocalSession, MaterializationLease, MaterializedFile } from "./types.js";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
@@ -77,6 +81,50 @@ function selectFiles(files: Record<string, { object: string }>, requested: strin
   return normalized;
 }
 
+async function cleanupMaterializedFiles(
+  root: string,
+  files: MaterializedFile[],
+  log: boolean,
+): Promise<Error[]> {
+  const failures: Error[] = [];
+  for (const file of files) {
+    try {
+      await removeMaterializedFile(root, file);
+      if (log) console.log(`Locked ${file.path}`);
+    } catch (error) {
+      failures.push(new Error(`${file.path}: ${(error as Error).message}`, { cause: error }));
+    }
+  }
+  return failures;
+}
+
+async function cleanupLease(root: string, lease: MaterializationLease, log: boolean): Promise<Error[]> {
+  const failures = await cleanupMaterializedFiles(root, lease.paths, log);
+  try {
+    await deleteLease(root);
+  } catch (error) {
+    failures.push(error as Error);
+  }
+  return failures;
+}
+
+function throwWithCleanupFailures(error: unknown, failures: Error[]): never {
+  if (failures.length > 0) {
+    throw new AggregateError(
+      [error, ...failures],
+      `operation failed and some materialized files changed: ${failures.map((failure) => failure.message).join("; ")}`,
+    );
+  }
+  throw error;
+}
+
+function cleanupError(message: string, failures: Error[]): AggregateError {
+  return new AggregateError(
+    failures,
+    `${message}: ${failures.map((failure) => failure.message).join("; ")}`,
+  );
+}
+
 export async function seal(root: string, requested: string[]): Promise<void> {
   const policy = await loadEnclist(root);
   const session = await loadSession(policy.authServer);
@@ -108,6 +156,10 @@ export async function seal(root: string, requested: string[]): Promise<void> {
         Buffer.from(`${JSON.stringify(encrypted, null, 2)}\n`),
         0o600,
       );
+      await refreshLeaseMaterialization(root, session, {
+        path: protectedPath,
+        digest: materializationDigest(plaintext),
+      });
       console.log(`Sealed ${protectedPath} -> ${objectPath}`);
     } finally {
       key.fill(0);
@@ -120,7 +172,7 @@ export async function unlock(root: string, requested: string[]): Promise<LocalSe
   const policy = await loadEnclist(root);
   const session = await loadSession(policy.authServer);
   const client = new AuthClient(policy.authServer);
-  const materialized: string[] = [];
+  const materialized: MaterializedFile[] = [];
   try {
     for (const protectedPath of selectFiles(policy.files, requested)) {
       if (!gitPathIsIgnored(root, protectedPath) || gitPathIsTracked(root, protectedPath)) {
@@ -144,8 +196,9 @@ export async function unlock(root: string, requested: string[]): Promise<LocalSe
       try {
         const plaintext = decryptFile(encrypted, key, policy.vaultId, protectedPath);
         try {
-          await atomicWrite(path.join(root, protectedPath), plaintext, 0o600);
-          materialized.push(protectedPath);
+          const file = { path: protectedPath, digest: materializationDigest(plaintext) };
+          await writeMaterializedFile(root, protectedPath, plaintext);
+          materialized.push(file);
         } finally {
           plaintext.fill(0);
         }
@@ -155,43 +208,58 @@ export async function unlock(root: string, requested: string[]): Promise<LocalSe
       }
     }
   } catch (error) {
-    for (const protectedPath of materialized) {
-      await removeMaterializedFile(root, protectedPath).catch(() => undefined);
-    }
-    throw error;
+    throwWithCleanupFailures(error, await cleanupMaterializedFiles(root, materialized, false));
   }
   try {
     await saveLease({
+      version: 1,
       root: path.resolve(root),
       server: policy.authServer,
       expiresAt: session.expiresAt,
+      userId: session.user.id,
+      sessionId: sessionId(session),
       paths: materialized,
     });
   } catch (error) {
-    for (const protectedPath of materialized) {
-      await removeMaterializedFile(root, protectedPath).catch(() => undefined);
-    }
-    throw error;
+    throwWithCleanupFailures(error, await cleanupMaterializedFiles(root, materialized, false));
   }
   return session;
 }
 
 export async function lock(root: string, logout = true): Promise<void> {
-  const lease = await loadLease(root);
-  for (const protectedPath of lease.paths) {
-    await removeMaterializedFile(root, protectedPath);
-    console.log(`Locked ${protectedPath}`);
+  const failures: Error[] = [];
+  let lease: MaterializationLease | undefined;
+  try {
+    lease = await loadLease(root);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") failures.push(error as Error);
   }
-  await deleteLease(root);
+  if (lease) failures.push(...await cleanupLease(root, lease, true));
+
   if (logout) {
-    try {
-      const session = await loadSession(lease.server);
-      await new AuthClient(lease.server).logout(session).catch(() => undefined);
-    } catch {
-      // Local cleanup must still succeed if the service or session is unavailable.
+    let server = lease?.server;
+    if (!server) {
+      try {
+        server = (await loadEnclist(root)).authServer;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") failures.push(error as Error);
+      }
     }
-    await deleteSession(lease.server);
+    if (server) {
+      try {
+        const session = await loadSession(server);
+        await new AuthClient(server).logout(session).catch(() => undefined);
+      } catch {
+        // Invalid, expired, or missing local sessions still need deletion.
+      }
+      try {
+        await deleteSession(server);
+      } catch (error) {
+        failures.push(error as Error);
+      }
+    }
   }
+  if (failures.length > 0) throw cleanupError("lock completed with errors", failures);
 }
 
 export async function lockIfSessionExpired(root: string, expectedExpiry: string): Promise<void> {
@@ -200,16 +268,20 @@ export async function lockIfSessionExpired(root: string, expectedExpiry: string)
   while (true) {
     const delay = Math.max(0, new Date(expiry).getTime() - Date.now() + 250);
     await new Promise((resolve) => setTimeout(resolve, delay));
+    let current: LocalSession;
     try {
-      const current = await loadSession(lease.server);
-      expiry = current.expiresAt;
+      current = await loadSession(lease.server);
     } catch {
-      for (const protectedPath of lease.paths) {
-        await removeMaterializedFile(root, protectedPath);
-      }
-      await deleteLease(root);
+      const failures = await cleanupLease(root, lease, false);
+      if (failures.length > 0) throw cleanupError("expiry cleanup completed with errors", failures);
       return;
     }
+    if (current.user.id !== lease.userId || sessionId(current) !== lease.sessionId) {
+      const failures = await cleanupLease(root, lease, false);
+      if (failures.length > 0) throw cleanupError("expiry cleanup completed with errors", failures);
+      return;
+    }
+    expiry = current.expiresAt;
   }
 }
 

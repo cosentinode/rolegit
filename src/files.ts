@@ -1,8 +1,10 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import path from "node:path";
 
 import { normalizeProtectedPath } from "./paths.js";
+import type { MaterializedFile } from "./types.js";
 
 export function repositoryRoot(cwd = process.cwd()): string {
   try {
@@ -107,8 +109,57 @@ export async function atomicWrite(destination: string, data: Buffer, mode: numbe
   }
 }
 
-export async function removeMaterializedFile(root: string, relativePath: string): Promise<void> {
+export function materializationDigest(data: Uint8Array): string {
+  return createHash("sha256").update(data).digest("hex");
+}
+
+export async function writeMaterializedFile(
+  root: string,
+  relativePath: string,
+  data: Buffer,
+): Promise<void> {
   const normalized = normalizeProtectedPath(relativePath);
   await assertNoSymlinkPath(root, normalized);
-  await rm(path.join(root, normalized), { force: true });
+  const destination = path.join(root, normalized);
+  await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+  let handle;
+  try {
+    handle = await open(destination, "wx", 0o600);
+    await handle.writeFile(data);
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+  } catch (error) {
+    await handle?.close().catch(() => undefined);
+    if (handle) await rm(destination, { force: true }).catch(() => undefined);
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new Error(`refusing to materialize ${normalized}: destination already exists`);
+    }
+    throw error;
+  }
+}
+
+export async function removeMaterializedFile(root: string, file: MaterializedFile): Promise<void> {
+  const normalized = normalizeProtectedPath(file.path);
+  await assertNoSymlinkPath(root, normalized);
+  const destination = path.join(root, normalized);
+  let destinationStat;
+  try {
+    destinationStat = await lstat(destination);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  if (!destinationStat.isFile()) {
+    throw new Error(`refusing to remove changed materialized path ${normalized}`);
+  }
+  const content = await readFile(destination);
+  try {
+    if (materializationDigest(content) !== file.digest) {
+      throw new Error(`refusing to remove modified materialized file ${normalized}`);
+    }
+  } finally {
+    content.fill(0);
+  }
+  await rm(destination);
 }

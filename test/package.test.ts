@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { cp, mkdtemp, rm, symlink } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-test("clean source package includes the CLI and referenced documentation", async (context) => {
+test("package rebuild excludes stale output and includes required files", async (context) => {
   const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
   const cleanRoot = await mkdtemp(path.join(tmpdir(), "rolegit-package-"));
   context.after(() => rm(cleanRoot, { recursive: true, force: true }));
@@ -22,10 +22,14 @@ test("clean source package includes the CLI and referenced documentation", async
   ]) {
     await cp(path.join(projectRoot, entry), path.join(cleanRoot, entry), { recursive: true });
   }
-  await symlink(path.join(projectRoot, "node_modules"), path.join(cleanRoot, "node_modules"), "dir");
-
-  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-  const output = execFileSync(npm, ["pack", "--dry-run", "--json"], {
+  const npm = process.platform === "win32" ? (process.env.ComSpec ?? "cmd.exe") : "npm";
+  const npmArgs = (args: string[]) => process.platform === "win32"
+    ? ["/d", "/s", "/c", "npm", ...args]
+    : args;
+  execFileSync(npm, npmArgs(["ci", "--ignore-scripts"]), { cwd: cleanRoot, stdio: "ignore" });
+  await mkdir(path.join(cleanRoot, "dist", "src"), { recursive: true });
+  await writeFile(path.join(cleanRoot, "dist", "src", "deleted-secret.js"), "stale output\n");
+  const output = execFileSync(npm, npmArgs(["pack", "--dry-run", "--json"]), {
     cwd: cleanRoot,
     encoding: "utf8",
   });
@@ -34,4 +38,5 @@ test("clean source package includes the CLI and referenced documentation", async
   assert.ok(files.includes("dist/src/cli.js"));
   assert.ok(files.includes("docs/security.md"));
   assert.ok(files.includes("server-policy.example.json"));
+  assert.ok(!files.includes("dist/src/deleted-secret.js"));
 });

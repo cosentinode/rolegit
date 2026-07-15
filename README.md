@@ -126,8 +126,12 @@ git push
 rolegit lock
 ```
 
-An expiry watcher removes materialized files after the current session expires. `rolegit lock`
-removes them immediately, invalidates the server session, and clears the local session token.
+An expiry watcher removes unchanged materialized files after the session that unlocked them expires.
+`rolegit lock` performs the same cleanup immediately, invalidates the server session, and clears the
+local session token even when no files are unlocked. RoleGit preserves any materialized path that was
+modified or replaced after the latest successful `unlock` or `seal`, reports the path, and relinquishes
+its cleanup lease rather than risking data loss. A new login cannot replace an active local session;
+run `rolegit lock` first.
 
 ## Current Scope
 
