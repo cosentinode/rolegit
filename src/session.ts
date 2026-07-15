@@ -12,6 +12,12 @@ function roleGitHome(): string {
   return process.env.ROLEGIT_HOME ?? path.join(homedir(), ".config", "rolegit");
 }
 
+function pathsEqual(first: string, second: string): boolean {
+  const left = path.resolve(first);
+  const right = path.resolve(second);
+  return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+
 export function repositoryId(root: string): string {
   let marker: string;
   try {
@@ -20,7 +26,7 @@ export function repositoryId(root: string): string {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
-    if (path.resolve(topLevel) !== path.resolve(root)) {
+    if (!pathsEqual(topLevel, root)) {
       return createHash("sha256").update(path.resolve(root)).digest("hex");
     }
     const gitPath = execFileSync("git", ["rev-parse", "--git-path", "rolegit-id"], {
