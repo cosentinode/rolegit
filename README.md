@@ -131,12 +131,13 @@ An expiry watcher removes unchanged materialized files after the session that un
 always clears the local session token when its repository/server association is available, even when
 no files are unlocked. It reports remote logout failures; the remote token then remains valid only
 until its fixed expiry. RoleGit preserves any materialized path that was modified or replaced after
-the latest successful `unlock` or `seal`, reports the path, and relinquishes its cleanup lease rather
-than risking data loss. Local sessions are repository-scoped even when repositories use the same
-authorization server, so `lock` invalidates only the current repository's token. A new login cannot
-replace an active local session or proceed while a live materialization lease remains. Login safely
-cleans unchanged files from an expired lease first and remains blocked if that cleanup reports
-modified paths.
+the latest successful `unlock` or `seal` rather than risking data loss. Explicit `lock` reports those
+paths and relinquishes its cleanup lease; failed automatic expiry cleanup retains the lease so a new
+identity cannot log in until the path is resolved or explicitly locked. Local sessions are
+repository-scoped even when repositories use the same authorization server, so `lock` invalidates
+only the current repository's token. A new login cannot replace an active local session or proceed
+while a live materialization lease remains. Login safely cleans unchanged files from an expired lease
+first and remains blocked if that cleanup reports modified paths.
 
 RoleGit stores a checkout UUID in Git's private metadata so local cleanup ownership survives moving
 or renaming the checkout without being committed. The UUID is bound to one machine-local checkout
@@ -152,8 +153,9 @@ is active before removing it.
 
 - Exact protected paths; Git-ignore-style patterns are planned.
 - Protected paths reject Windows device names, alternate-data-stream syntax, trailing dots/spaces,
-  metadata namespaces, and policy/Git entries that differ only by case so one policy remains safe
-  across platforms.
+  `.gitignore`, Git/RoleGit metadata namespaces, and policy/Git/worktree entries that differ only by
+  case. Generated ignore rules cover portable case aliases under ordinary Git behavior. Filenames
+  such as `__proto__` and `constructor` remain valid user paths.
 - Server state and sessions are in memory and disappear on restart.
 - The key-encryption key comes from `ROLEGIT_KEK`; production KMS integration is not implemented.
 - On POSIX systems, session tokens and materialized files are created with mode `0600`. Node's

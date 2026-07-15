@@ -46,7 +46,7 @@ export function encryptedObjectPath(protectedPath: string): string {
 
 export function createEnclist(authServer: string): Enclist {
   validateAuthServer(authServer);
-  return { version: 1, vaultId: randomUUID(), authServer, files: {} };
+  return { version: 1, vaultId: randomUUID(), authServer, files: Object.create(null) as Enclist["files"] };
 }
 
 export function validateAuthServer(value: string): void {
@@ -64,11 +64,11 @@ export function parseEnclist(value: unknown): Enclist {
   const authServer = string(root.authServer, "authServer");
   validateAuthServer(authServer);
   const rawFiles = object(root.files, "files");
-  const files: Record<string, EnclistFile> = {};
+  const files: Record<string, EnclistFile> = Object.create(null) as Record<string, EnclistFile>;
   const portablePaths = new Map<string, string>();
   for (const [rawPath, rawFile] of Object.entries(rawFiles)) {
     const protectedPath = normalizePlaintextPath(rawPath);
-    if (files[protectedPath]) throw new Error(`duplicate protected path: ${protectedPath}`);
+    if (Object.hasOwn(files, protectedPath)) throw new Error(`duplicate protected path: ${protectedPath}`);
     const portablePath = protectedPath.toLowerCase();
     const alias = portablePaths.get(portablePath);
     if (alias !== undefined && alias !== protectedPath) {
@@ -148,11 +148,11 @@ export function parseServerPolicy(value: unknown): ServerPolicy {
   const root = object(value, "server policy");
   if (root.version !== 1) throw new Error("unsupported server policy version");
   const rawVaults = object(root.vaults, "vaults");
-  const vaults: ServerPolicy["vaults"] = {};
+  const vaults: ServerPolicy["vaults"] = Object.create(null) as ServerPolicy["vaults"];
   for (const [vaultId, rawVault] of Object.entries(rawVaults)) {
     const vault = object(rawVault, `vaults.${vaultId}`);
     const rawFiles = object(vault.files, `vaults.${vaultId}.files`);
-    const files: Record<string, AccessRule> = {};
+    const files: Record<string, AccessRule> = Object.create(null) as Record<string, AccessRule>;
     const portablePaths = new Map<string, string>();
     for (const [rawPath, rawRule] of Object.entries(rawFiles)) {
       const protectedPath = normalizePlaintextPath(rawPath);

@@ -81,6 +81,23 @@ test("protect rejects tracked and historical path case aliases", async (context)
   await assert.rejects(() => protect(root, "config.env"), /exists in Git history/);
 });
 
+test("protect rejects existing worktree aliases and ignores future portable aliases", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-worktree-case-alias-");
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  await initialize(root, "http://127.0.0.1:8787");
+  await writeFile(path.join(root, "Existing.env"), "SECRET=existing-case-alias\n");
+  await assert.rejects(() => protect(root, "existing.env"), /differs only by case from existing path/);
+
+  await protect(root, "future.env");
+  await writeFile(path.join(root, "Future.env"), "SECRET=future-case-alias\n");
+  execFileSync("git", ["check-ignore", "--quiet", "--", "Future.env"], { cwd: root });
+  execFileSync("git", ["add", "."], { cwd: root });
+  assert.throws(() => execFileSync("git", ["ls-files", "--error-unmatch", "--", "Future.env"], {
+    cwd: root,
+    stdio: "ignore",
+  }));
+});
+
 test("protect rejects portable RoleGit and Git metadata namespaces", async (context) => {
   const root = await temporaryDirectory(context, "rolegit-metadata-paths-");
   const gitDirectory = path.join(root, "control");
@@ -92,6 +109,7 @@ test("protect rejects portable RoleGit and Git metadata namespaces", async (cont
     ".enclist/child",
     ".ROLEGIT",
     ".rolegit/file",
+    ".GITIGNORE",
     ".GIT",
     ".git/config",
     "CONTROL/config",
@@ -102,6 +120,35 @@ test("protect rejects portable RoleGit and Git metadata namespaces", async (cont
   policy.files["CONTROL/config"] = { object: encryptedObjectPath("CONTROL/config") };
   await writeFile(path.join(root, ".enclist"), `${JSON.stringify(policy)}\n`);
   await assert.rejects(() => loadEnclist(root), /Git metadata cannot be protected/);
+});
+
+test("protect excludes environment-selected in-worktree Git metadata", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-environment-git-dir-");
+  const control = path.join(root, "control");
+  execFileSync("git", ["init", "--bare", "--quiet", control]);
+  const previousGitDirectory = process.env.GIT_DIR;
+  const previousWorkTree = process.env.GIT_WORK_TREE;
+  process.env.GIT_DIR = control;
+  process.env.GIT_WORK_TREE = root;
+  context.after(() => {
+    if (previousGitDirectory === undefined) delete process.env.GIT_DIR;
+    else process.env.GIT_DIR = previousGitDirectory;
+    if (previousWorkTree === undefined) delete process.env.GIT_WORK_TREE;
+    else process.env.GIT_WORK_TREE = previousWorkTree;
+  });
+  await initialize(root, "http://127.0.0.1:8787");
+
+  await assert.rejects(() => protect(root, "CONTROL/config"), /metadata cannot be protected/);
+});
+
+test("prototype-named plaintext paths remain ordinary policy entries", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-prototype-names-");
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  await initialize(root, "http://127.0.0.1:8787");
+  await protect(root, "__proto__");
+  await protect(root, "constructor");
+
+  assert.deepEqual(Object.keys((await loadEnclist(root)).files).sort(), ["__proto__", "constructor"]);
 });
 
 test("materialized-file removal refuses paths outside the repository", async (context) => {

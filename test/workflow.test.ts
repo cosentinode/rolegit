@@ -365,7 +365,8 @@ test("expiry cleanup does not extend a lease across sessions or delete changed f
   assert.equal(await readFile(path.join(root, "dirty.env"), "utf8"), "unsaved edit\n");
   assert.ok((await stat(path.join(root, "replaced.env"))).isDirectory());
   await assert.rejects(() => stat(path.join(root, "clean.env")), { code: "ENOENT" });
-  await assert.rejects(() => loadLease(root), { code: "ENOENT" });
+  assert.equal((await loadLease(root)).sessionId, sessionId(alice));
+  await assert.rejects(() => login(root, alice.server, 303), /files are unlocked/);
   assert.equal((await loadSession(root, bob.server)).user.id, bob.user.id);
 });
 
@@ -416,6 +417,27 @@ test("unlock cleans an unchanged lease after offline session expiry", async (con
   await assert.rejects(() => stat(path.join(root, ".env")), { code: "ENOENT" });
   await assert.rejects(() => loadLease(root), { code: "ENOENT" });
   await assert.rejects(() => loadSession(root, session.server), /run `rolegit login` first/);
+});
+
+test("failed unlock expiry cleanup retains ownership and blocks replacement login", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-failed-unlock-expiry-");
+  process.env.ROLEGIT_HOME = path.join(root, ".test-home");
+  const session = localSession(
+    "http://127.0.0.1:8787",
+    101,
+    "failed-unlock-expiry-token",
+    new Date(Date.now() - 1_000).toISOString(),
+  );
+  const original = Buffer.from("original expired unlock materialization\n");
+  await initialize(root, session.server);
+  await writeFile(path.join(root, ".env"), "modified expired unlock materialization\n");
+  await saveSession(root, session);
+  await saveLease(leaseFor(root, session, [{ path: ".env", digest: materializationDigest(original) }]));
+
+  await assert.rejects(() => unlock(root, []), /modified materialized file/);
+  assert.equal((await loadLease(root)).sessionId, sessionId(session));
+  await assert.rejects(() => login(root, session.server, 202), /expired lease cleanup.*modified materialized file/);
+  assert.equal((await loadLease(root)).sessionId, sessionId(session));
 });
 
 test("concurrent same-session lease updates retain every materialized path", async (context) => {

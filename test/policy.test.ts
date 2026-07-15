@@ -83,7 +83,7 @@ test("enclist rejects encrypted object aliases", () => {
 });
 
 test("policies reject portable metadata namespaces", () => {
-  for (const protectedPath of [".ENCLIST", ".rolegit", ".ROLEGIT/file", ".git/config"]) {
+  for (const protectedPath of [".ENCLIST", ".GITIGNORE", ".gitignore/child", ".rolegit", ".ROLEGIT/file", ".git/config"]) {
     assert.throws(() => parseEnclist({
       version: 1,
       vaultId: "vault",
@@ -102,6 +102,39 @@ test("policies reject portable metadata namespaces", () => {
       },
     },
   }), /metadata cannot be protected/);
+});
+
+test("policy maps preserve prototype-named files and vaults", () => {
+  const clientFiles = {
+    ["__proto__"]: { object: encryptedObjectPath("__proto__") },
+    constructor: { object: encryptedObjectPath("constructor") },
+  };
+  const clientPolicy = parseEnclist({
+    version: 1,
+    vaultId: "vault",
+    authServer: "http://127.0.0.1:8787",
+    files: clientFiles,
+  });
+  assert.equal(Object.hasOwn(clientPolicy.files, "__proto__"), true);
+  assert.equal(Object.hasOwn(clientPolicy.files, "constructor"), true);
+
+  const serverPolicy = parseServerPolicy({
+    version: 1,
+    sessionMinutes: 60,
+    keyId: "dev",
+    vaults: {
+      ["__proto__"]: {
+        repository: "acme/project",
+        files: {
+          ["__proto__"]: { users: [1], teams: [] },
+          constructor: { users: [1], teams: [] },
+        },
+      },
+    },
+  });
+  assert.equal(Object.hasOwn(serverPolicy.vaults, "__proto__"), true);
+  assert.equal(Object.hasOwn(serverPolicy.vaults.__proto__!.files, "__proto__"), true);
+  assert.equal(Object.hasOwn(serverPolicy.vaults.__proto__!.files, "constructor"), true);
 });
 
 test("enclist only permits loopback HTTP", () => {

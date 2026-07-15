@@ -32,7 +32,7 @@ export function normalizeProtectedPath(value: string): string {
 export function normalizePlaintextPath(value: string): string {
   const normalized = normalizeProtectedPath(value);
   const portablePath = normalized.toLowerCase();
-  if ([".enclist", ".rolegit", ".git"].some((metadataPath) =>
+  if ([".enclist", ".gitignore", ".rolegit", ".git"].some((metadataPath) =>
     portablePath === metadataPath || portablePath.startsWith(`${metadataPath}/`))) {
     throw new Error(`repository metadata cannot be protected: ${value}`);
   }

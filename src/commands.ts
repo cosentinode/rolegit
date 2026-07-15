@@ -12,6 +12,7 @@ import {
   gitPathExistsInHistory,
   gitPathIsTracked,
   gitMetadataPath,
+  existingPortablePathAlias,
   materializationDigest,
   removeMaterializedFile,
   writeMaterializedFile,
@@ -81,6 +82,8 @@ async function protectUnlocked(root: string, inputPath: string): Promise<void> {
   if (gitPathExistsInHistory(root, protectedPath)) {
     throw new Error(`${protectedPath} exists in Git history; rewrite the history and rotate its secrets first`);
   }
+  const filesystemAlias = await existingPortablePathAlias(root, protectedPath);
+  if (filesystemAlias) throw new Error(`${protectedPath} differs only by case from existing path ${filesystemAlias}`);
   await assertNoSymlinkPath(root, protectedPath);
   await appendGitIgnore(root, protectedPath);
   if (!gitPathIsIgnored(root, protectedPath)) {
@@ -223,7 +226,7 @@ export function seal(root: string, requested: string[]): Promise<void> {
 
 async function unlockUnlocked(root: string, requested: string[]): Promise<LocalSession> {
   const policy = await loadEnclist(root);
-  const staleFailures = await cleanupExpiredLease(root);
+  const staleFailures = await cleanupExpiredLease(root, true);
   let session: LocalSession;
   try {
     session = await loadSessionUnlocked(root, policy.authServer);
@@ -379,12 +382,12 @@ export async function lockIfSessionExpired(root: string, expectedExpiry: string)
       try {
         current = await loadSessionUnlocked(root, lease.server);
       } catch {
-        const failures = await cleanupLease(root, lease, false);
+        const failures = await cleanupLease(root, lease, false, true);
         if (failures.length > 0) throw cleanupError("expiry cleanup completed with errors", failures);
         return undefined;
       }
       if (current.user.id !== lease.userId || sessionId(current) !== lease.sessionId) {
-        const failures = await cleanupLease(root, lease, false);
+        const failures = await cleanupLease(root, lease, false, true);
         if (failures.length > 0) throw cleanupError("expiry cleanup completed with errors", failures);
         return undefined;
       }

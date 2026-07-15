@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
-import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, readdir, rename, rm } from "node:fs/promises";
 import path from "node:path";
 
 import { normalizePlaintextPath } from "./paths.js";
@@ -38,12 +38,14 @@ function portablePathspec(relativePath: string): string {
 }
 
 export function gitMetadataPath(root: string): string | undefined {
+  let hasGitEntry = true;
   try {
     lstatSync(path.join(root, ".git"));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    hasGitEntry = false;
   }
+  if (!hasGitEntry && process.env.GIT_DIR === undefined && process.env.GIT_WORK_TREE === undefined) return undefined;
   let gitDirectory: string;
   try {
     gitDirectory = execFileSync("git", ["rev-parse", "--absolute-git-dir"], {
@@ -60,6 +62,28 @@ export function gitMetadataPath(root: string): string | undefined {
   if (relative === "") return ".";
   if (path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`)) return undefined;
   return relative.split(path.sep).join("/");
+}
+
+export async function existingPortablePathAlias(root: string, relativePath: string): Promise<string | undefined> {
+  const components = relativePath.split("/");
+  const actual: string[] = [];
+  let current = root;
+  for (const component of components) {
+    let entries: string[];
+    try {
+      entries = await readdir(current);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+    const matches = entries.filter((entry) => entry.toLowerCase() === component.toLowerCase());
+    const alias = matches.find((entry) => entry !== component);
+    if (alias !== undefined) return [...actual, alias, ...components.slice(actual.length + 1)].join("/");
+    if (!matches.includes(component)) return undefined;
+    actual.push(component);
+    current = path.join(current, component);
+  }
+  return undefined;
 }
 
 export function gitPathIsTracked(root: string, relativePath: string): boolean {
@@ -117,7 +141,14 @@ export async function appendGitIgnore(root: string, relativePath: string): Promi
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  const escapedPath = relativePath.replaceAll(/([\\*?\[\]!#])/g, "\\$1");
+  const escapedPath = Array.from(relativePath, (character) => {
+    if (character === "/") return character;
+    const variants = [...new Set([character, character.toLowerCase(), character.toUpperCase()])];
+    if (variants.length > 1 && variants.every((variant) => Array.from(variant).length === 1)) {
+      return `[${variants.map((variant) => variant.replaceAll(/([\\\]\-^])/g, "\\$1")).join("")}]`;
+    }
+    return character.replaceAll(/([\\*?\[\]!#])/g, "\\$1");
+  }).join("");
   const lines = [`/${escapedPath}`, `/${escapedPath}.rolegit-*.tmp`];
   const existing = new Set(content.split(/\r?\n/));
   const additions = lines.filter((line) => !existing.has(line));
