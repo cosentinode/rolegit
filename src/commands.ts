@@ -32,6 +32,8 @@ import {
   loadSessionUnlocked,
   repositoryId,
   refreshLeaseMaterializationUnlocked,
+  replaceLeaseMaterializationsUnlocked,
+  roleGitMetadataPath,
   saveLeaseUnlocked,
   saveRepositoryServerUnlocked,
   saveSessionUnlocked,
@@ -65,7 +67,7 @@ async function protectUnlocked(root: string, inputPath: string): Promise<void> {
   const relativeInput = path.isAbsolute(inputPath) ? path.relative(root, inputPath) : inputPath;
   const protectedPath = normalizePlaintextPath(relativeInput);
   const portablePath = protectedPath.toLowerCase();
-  const metadataNamespaces = [gitMetadataPath(root)]
+  const metadataNamespaces = [gitMetadataPath(root), roleGitMetadataPath(root)]
     .filter((entry): entry is string => entry !== undefined)
     .map((entry) => entry.toLowerCase());
   if (metadataNamespaces.some((entry) =>
@@ -112,6 +114,7 @@ async function cleanupMaterializedFiles(
   root: string,
   files: MaterializedFile[],
   log: boolean,
+  retained?: MaterializedFile[],
 ): Promise<Error[]> {
   const failures: Error[] = [];
   for (const file of files) {
@@ -119,6 +122,7 @@ async function cleanupMaterializedFiles(
       await removeMaterializedFile(root, file);
       if (log) console.log(`Locked ${file.path}`);
     } catch (error) {
+      retained?.push(file);
       failures.push(new Error(`${file.path}: ${(error as Error).message}`, { cause: error }));
     }
   }
@@ -237,7 +241,24 @@ async function unlockUnlocked(root: string, requested: string[]): Promise<LocalS
     throw cleanupError("expired lease cleanup completed with errors", staleFailures);
   }
   const client = new AuthClient(policy.authServer);
-  const materialized: MaterializedFile[] = [];
+  let previousPaths: MaterializedFile[] = [];
+  try {
+    previousPaths = (await loadLease(root)).paths;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const lease: MaterializationLease = {
+    version: 1,
+    repositoryId: repositoryId(root),
+    root: path.resolve(root),
+    server: policy.authServer,
+    expiresAt: session.expiresAt,
+    userId: session.user.id,
+    sessionId: sessionId(session),
+    paths: [],
+  };
+  await saveLeaseUnlocked(lease);
+  const owned: MaterializedFile[] = [];
   try {
     for (const protectedPath of selectFiles(policy.files, requested)) {
       if (!gitPathIsIgnored(root, protectedPath) || gitPathIsTracked(root, protectedPath)) {
@@ -265,8 +286,15 @@ async function unlockUnlocked(root: string, requested: string[]): Promise<LocalS
         const plaintext = decryptFile(encrypted, key, policy.vaultId, protectedPath);
         try {
           const file = { path: protectedPath, digest: materializationDigest(plaintext) };
-          await writeMaterializedFile(root, protectedPath, plaintext);
-          materialized.push(file);
+          await saveLeaseUnlocked({ ...lease, paths: [file] });
+          try {
+            await writeMaterializedFile(root, protectedPath, plaintext);
+            owned.push(file);
+          } catch (error) {
+            const cause = (error as Error).cause as NodeJS.ErrnoException | undefined;
+            if (cause?.code !== "EEXIST") owned.push(file);
+            throw error;
+          }
         } finally {
           plaintext.fill(0);
         }
@@ -276,21 +304,14 @@ async function unlockUnlocked(root: string, requested: string[]): Promise<LocalS
       }
     }
   } catch (error) {
-    throwWithCleanupFailures(error, await cleanupMaterializedFiles(root, materialized, false));
-  }
-  try {
-    await saveLeaseUnlocked({
-      version: 1,
-      repositoryId: repositoryId(root),
-      root: path.resolve(root),
-      server: policy.authServer,
-      expiresAt: session.expiresAt,
-      userId: session.user.id,
-      sessionId: sessionId(session),
-      paths: materialized,
-    });
-  } catch (error) {
-    throwWithCleanupFailures(error, await cleanupMaterializedFiles(root, materialized, false));
+    const retained: MaterializedFile[] = [];
+    const failures = await cleanupMaterializedFiles(root, owned, false, retained);
+    try {
+      await replaceLeaseMaterializationsUnlocked({ ...lease, paths: [...previousPaths, ...retained] });
+    } catch (leaseError) {
+      failures.push(leaseError as Error);
+    }
+    throwWithCleanupFailures(error, failures);
   }
   return session;
 }

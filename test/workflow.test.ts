@@ -21,7 +21,7 @@ import {
   unlock,
 } from "../src/commands.js";
 import { atomicWrite, materializationDigest } from "../src/files.js";
-import { loadEnclist, saveEnclist } from "../src/policy.js";
+import { encryptedObjectPath, loadEnclist, saveEnclist } from "../src/policy.js";
 import {
   deleteSession,
   loadLease,
@@ -262,6 +262,68 @@ test("protect, seal, lock, and unlock workflow", async (context) => {
   await assert.rejects(() => stat(path.join(root, ".env")), { code: "ENOENT" });
 });
 
+test("failed partial unlock retains cleanup ownership for plaintext rollback failures", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-partial-unlock-");
+  process.env.ROLEGIT_HOME = path.join(root, ".test-home");
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  const serverPolicy: ServerPolicy = {
+    version: 1,
+    sessionMinutes: 60,
+    keyId: "partial-unlock-key",
+    developmentUsers: [{ id: 101, login: "partial-unlock-user" }],
+    vaults: {},
+  };
+  const server = createAuthServer({
+    policy: serverPolicy,
+    keyEncryptionKey: randomBytes(32),
+    allowDevelopmentAuth: true,
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  context.after(() => server.close());
+  const authServer = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const firstPlaintext = "FIRST=original\n";
+
+  await initialize(root, authServer);
+  await writeFile(path.join(root, "first.env"), firstPlaintext);
+  await writeFile(path.join(root, "second.env"), "SECOND=original\n");
+  await protect(root, "first.env");
+  await protect(root, "second.env");
+  const policy = await loadEnclist(root);
+  serverPolicy.vaults[policy.vaultId] = {
+    repository: "local/partial-unlock",
+    files: {
+      "first.env": { users: [101], teams: [] },
+      "second.env": { users: [101], teams: [] },
+    },
+  };
+  await login(root, authServer, 101);
+  await seal(root, []);
+  await rm(path.join(root, "first.env"));
+  await rm(path.join(root, "second.env"));
+  serverPolicy.vaults[policy.vaultId]!.files["second.env"] = { users: [], teams: [] };
+
+  const originalFetch = globalThis.fetch;
+  let unwraps = 0;
+  globalThis.fetch = async (input, init) => {
+    if (new URL(String(input)).pathname === "/v1/keys/unwrap" && ++unwraps === 2) {
+      await writeFile(path.join(root, "first.env"), "FIRST=modified during rollback\n");
+    }
+    return originalFetch(input, init);
+  };
+  try {
+    await assert.rejects(() => unlock(root, []), /modified materialized file first\.env/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(await readFile(path.join(root, "first.env"), "utf8"), "FIRST=modified during rollback\n");
+  await assert.rejects(() => stat(path.join(root, "second.env")), { code: "ENOENT" });
+  const lease = await loadLease(root);
+  assert.deepEqual(lease.paths.map((file) => file.path), ["first.env"]);
+  assert.equal(lease.paths[0]!.digest, materializationDigest(Buffer.from(firstPlaintext)));
+});
+
 test("lock and failed unlock preserve plaintext without a lease", async (context) => {
   const root = await temporaryDirectory(context, "rolegit-no-lease-");
   process.env.ROLEGIT_HOME = path.join(root, ".test-home");
@@ -308,6 +370,38 @@ test("lock rejects a lease path outside the repository without deleting it", asy
   await assert.rejects(() => lock(root), /lock completed with errors/);
   assert.equal(await readFile(outside, "utf8"), "keep me\n");
   await assert.rejects(() => loadSession(root, session.server), /run `rolegit login` first/);
+});
+
+test("repository-local RoleGit control paths are reserved from policies and leases", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-local-home-");
+  const home = path.join(root, "state");
+  process.env.ROLEGIT_HOME = home;
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  const session = localSession("http://127.0.0.1:8787", 101, "local-home-token");
+  await initialize(root, session.server);
+  await saveSession(root, session);
+  await saveLease(leaseFor(root, session, []));
+
+  const controlPaths: string[] = [];
+  for (const directory of ["sessions", "repositories", "leases"]) {
+    const entry = (await readdir(path.join(home, directory))).find((name) => name.endsWith(".json"));
+    assert.ok(entry);
+    controlPaths.push(`STATE/${directory}/${entry}`);
+  }
+  for (const controlPath of controlPaths) {
+    await assert.rejects(() => protect(root, controlPath), /metadata cannot be protected/);
+  }
+
+  const policy = await loadEnclist(root);
+  policy.files[controlPaths[0]!] = { object: encryptedObjectPath(controlPaths[0]!) };
+  await assert.rejects(() => saveEnclist(root, policy), /metadata cannot be protected/);
+  await assert.rejects(
+    () => saveLease(leaseFor(root, session, [{
+      path: controlPaths[2]!,
+      digest: materializationDigest(Buffer.from("control state\n")),
+    }])),
+    /materialization lease cannot contain repository metadata/,
+  );
 });
 
 test("lock preserves changed files but cleans other paths and the session", async (context) => {

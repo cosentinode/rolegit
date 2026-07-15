@@ -119,7 +119,7 @@ test("protect rejects portable RoleGit and Git metadata namespaces", async (cont
   const policy = await loadEnclist(root);
   policy.files["CONTROL/config"] = { object: encryptedObjectPath("CONTROL/config") };
   await writeFile(path.join(root, ".enclist"), `${JSON.stringify(policy)}\n`);
-  await assert.rejects(() => loadEnclist(root), /Git metadata cannot be protected/);
+  await assert.rejects(() => loadEnclist(root), /metadata cannot be protected/);
 });
 
 test("protect excludes environment-selected in-worktree Git metadata", async (context) => {

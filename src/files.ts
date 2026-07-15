@@ -214,7 +214,7 @@ export async function writeMaterializedFile(
     await handle?.close().catch(() => undefined);
     if (handle) await rm(destination, { force: true }).catch(() => undefined);
     if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-      throw new Error(`refusing to materialize ${normalized}: destination already exists`);
+      throw new Error(`refusing to materialize ${normalized}: destination already exists`, { cause: error });
     }
     throw error;
   }

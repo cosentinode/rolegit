@@ -137,6 +137,27 @@ test("policy maps preserve prototype-named files and vaults", () => {
   assert.equal(Object.hasOwn(serverPolicy.vaults.__proto__!.files, "constructor"), true);
 });
 
+test("server policies reject duplicate normalized protected paths", () => {
+  const rule = (user: number) => ({ users: [user], teams: [] });
+  for (const files of [
+    { "dir/../secret.env": rule(101), "secret.env": rule(202) },
+    { ["nested\\..\\__proto__"]: rule(101), ["__proto__"]: rule(202) },
+    { ["nested/../constructor"]: rule(101), constructor: rule(202) },
+  ]) {
+    assert.throws(() => parseServerPolicy({
+      version: 1,
+      sessionMinutes: 60,
+      keyId: "dev",
+      vaults: {
+        ["__proto__"]: {
+          repository: "acme/project",
+          files,
+        },
+      },
+    }), /duplicate protected path/);
+  }
+});
+
 test("enclist only permits loopback HTTP", () => {
   const base = { version: 1, vaultId: "vault", files: {} };
   assert.doesNotThrow(() => parseEnclist({ ...base, authServer: "http://127.0.0.1:8787" }));

@@ -130,14 +130,16 @@ An expiry watcher removes unchanged materialized files after the session that un
 `rolegit lock` performs the same cleanup immediately, attempts to invalidate the server session, and
 always clears the local session token when its repository/server association is available, even when
 no files are unlocked. It reports remote logout failures; the remote token then remains valid only
-until its fixed expiry. RoleGit preserves any materialized path that was modified or replaced after
-the latest successful `unlock` or `seal` rather than risking data loss. Explicit `lock` reports those
-paths and relinquishes its cleanup lease; failed automatic expiry cleanup retains the lease so a new
-identity cannot log in until the path is resolved or explicitly locked. Local sessions are
-repository-scoped even when repositories use the same authorization server, so `lock` invalidates
-only the current repository's token. A new login cannot replace an active local session or proceed
-while a live materialization lease remains. Login safely cleans unchanged files from an expired lease
-first and remains blocked if that cleanup reports modified paths.
+until its fixed expiry. `unlock` reserves cleanup ownership before creating each plaintext path, and a
+failed partial unlock retains ownership for any rollback failure. RoleGit preserves any materialized
+path that was modified or replaced after the latest successful `unlock` or `seal` rather than risking
+data loss. Explicit `lock` reports those paths and relinquishes its cleanup lease; failed automatic
+expiry cleanup retains the lease so a new identity cannot log in until the path is resolved or
+explicitly locked. Local sessions are repository-scoped even when repositories use the same
+authorization server, so `lock` invalidates only the current repository's token. A new login cannot
+replace an active local session or proceed while a live materialization lease remains. Login safely
+cleans unchanged files from an expired lease first and remains blocked if that cleanup reports
+modified paths.
 
 RoleGit stores a checkout UUID in Git's private metadata so local cleanup ownership survives moving
 or renaming the checkout without being committed. The UUID is bound to one machine-local checkout
@@ -145,9 +147,10 @@ directory by filesystem identity, so aliases to that directory retain access whi
 fails closed before accessing sessions, leases, or plaintext. Remove any copied materialized plaintext
 before assigning the copy a fresh identity. `ROLEGIT_HOME`, when set, must be absolute so commands from
 different working directories cannot select different state. Repository mutations, including `init`
-and `protect`, and session operations use machine-local lock files. A lock left by a terminated process
-is never removed automatically: commands fail with its path so the user can verify no RoleGit process
-is active before removing it.
+and `protect`, and session operations use machine-local lock files. If `ROLEGIT_HOME` is inside the
+worktree, its complete namespace is reserved from protection and materialization. A lock left by a
+terminated process is never removed automatically: commands fail with its path so the user can verify
+no RoleGit process is active before removing it.
 
 ## Current Scope
 

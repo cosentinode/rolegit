@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { lstat, mkdir, open, readFile, realpath, rename, rm, stat } from "node:fs/promises";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { gitMetadataPath } from "./files.js";
@@ -15,6 +15,25 @@ function roleGitHome(): string {
     throw new Error("ROLEGIT_HOME must be an absolute path");
   }
   return path.resolve(configured ?? path.join(homedir(), ".config", "rolegit"));
+}
+
+function containedRelativePath(root: string, target: string): string | undefined {
+  const relative = path.relative(root, target);
+  if (path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`)) return undefined;
+  return relative === "" ? "." : relative.split(path.sep).join("/");
+}
+
+export function roleGitMetadataPath(root: string): string | undefined {
+  const resolvedRoot = path.resolve(root);
+  const home = roleGitHome();
+  const lexical = containedRelativePath(resolvedRoot, home);
+  if (lexical !== undefined) return lexical;
+  try {
+    return containedRelativePath(realpathSync.native(resolvedRoot), realpathSync.native(home));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
 }
 
 function pathNamesEqual(first: string, second: string): boolean {
@@ -387,38 +406,60 @@ function normalizeMaterializedFile(value: unknown, root?: string): MaterializedF
     throw new Error("invalid materialization lease");
   }
   const protectedPath = normalizePlaintextPath(file.path);
-  const metadataPath = root === undefined ? undefined : gitMetadataPath(root)?.toLowerCase();
+  const metadataPaths = root === undefined
+    ? []
+    : [gitMetadataPath(root), roleGitMetadataPath(root)]
+      .filter((entry): entry is string => entry !== undefined)
+      .map((entry) => entry.toLowerCase());
   const portablePath = protectedPath.toLowerCase();
-  if (
-    metadataPath !== undefined &&
-    (metadataPath === "." || portablePath === metadataPath || portablePath.startsWith(`${metadataPath}/`))
-  ) {
-    throw new Error("materialization lease cannot contain Git metadata");
+  if (metadataPaths.some((metadataPath) =>
+    metadataPath === "." || portablePath === metadataPath || portablePath.startsWith(`${metadataPath}/`))) {
+    throw new Error("materialization lease cannot contain repository metadata");
   }
   return { path: protectedPath, digest: file.digest! };
 }
 
 export async function saveLeaseUnlocked(lease: MaterializationLease): Promise<void> {
-    let existing: MaterializationLease | undefined;
-    try {
-      existing = await loadLease(lease.root);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  let existing: MaterializationLease | undefined;
+  try {
+    existing = await loadLease(lease.root);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (existing) {
+    if (
+      existing.server !== lease.server ||
+      existing.userId !== lease.userId ||
+      existing.sessionId !== lease.sessionId
+    ) {
+      throw new Error("files are unlocked by a different session; run `rolegit lock` first");
     }
-    if (existing) {
-      if (
-        existing.server !== lease.server ||
-        existing.userId !== lease.userId ||
-        existing.sessionId !== lease.sessionId
-      ) {
-        throw new Error("files are unlocked by a different session; run `rolegit lock` first");
-      }
-    }
-    const paths = new Map(existing?.paths.map((file) => [file.path, file]));
-    for (const file of lease.paths.map((file) => normalizeMaterializedFile(file, lease.root))) {
-      paths.set(file.path, file);
-    }
-    await writePrivateJson(leasePath(lease.root), { ...lease, paths: [...paths.values()] });
+  }
+  const paths = new Map(existing?.paths.map((file) => [file.path, file]));
+  for (const file of lease.paths.map((file) => normalizeMaterializedFile(file, lease.root))) {
+    paths.set(file.path, file);
+  }
+  await writePrivateJson(leasePath(lease.root), { ...lease, paths: [...paths.values()] });
+}
+
+export async function replaceLeaseMaterializationsUnlocked(lease: MaterializationLease): Promise<void> {
+  const current = await loadLease(lease.root);
+  if (
+    current.server !== lease.server ||
+    current.userId !== lease.userId ||
+    current.sessionId !== lease.sessionId
+  ) {
+    throw new Error("files are unlocked by a different session; run `rolegit lock` first");
+  }
+  const paths = new Map<string, MaterializedFile>();
+  for (const file of lease.paths.map((entry) => normalizeMaterializedFile(entry, lease.root))) {
+    paths.set(file.path, file);
+  }
+  if (paths.size === 0) {
+    await deleteLeaseUnlocked(lease.root);
+    return;
+  }
+  await writePrivateJson(leasePath(lease.root), { ...lease, paths: [...paths.values()] });
 }
 
 export function saveLease(lease: MaterializationLease): Promise<void> {
