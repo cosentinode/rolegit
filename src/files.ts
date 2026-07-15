@@ -18,15 +18,30 @@ export function repositoryRoot(cwd = process.cwd()): string {
   }
 }
 
+function expectedGitNegative(error: unknown): boolean {
+  return typeof error === "object" && error !== null && (error as { status?: unknown }).status === 1;
+}
+
+function gitFailure(operation: string, error: unknown): never {
+  const rawStderr = typeof error === "object" && error !== null
+    ? (error as { stderr?: unknown }).stderr
+    : undefined;
+  const stderr = Buffer.isBuffer(rawStderr) || typeof rawStderr === "string"
+    ? rawStderr.toString().trim()
+    : "";
+  throw new Error(`git ${operation} failed${stderr ? `: ${stderr}` : ""}`, { cause: error });
+}
+
 export function gitPathIsTracked(root: string, relativePath: string): boolean {
   try {
     execFileSync("git", ["ls-files", "--error-unmatch", "--", relativePath], {
       cwd: root,
-      stdio: "ignore",
+      stdio: ["ignore", "ignore", "pipe"],
     });
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    if (expectedGitNegative(error)) return false;
+    gitFailure("ls-files", error);
   }
 }
 
@@ -34,11 +49,12 @@ export function gitPathIsIgnored(root: string, relativePath: string): boolean {
   try {
     execFileSync("git", ["check-ignore", "--quiet", "--", relativePath], {
       cwd: root,
-      stdio: "ignore",
+      stdio: ["ignore", "ignore", "pipe"],
     });
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    if (expectedGitNegative(error)) return false;
+    gitFailure("check-ignore", error);
   }
 }
 
@@ -47,11 +63,11 @@ export function gitPathExistsInHistory(root: string, relativePath: string): bool
     const output = execFileSync("git", ["log", "--all", "--format=%H", "--", relativePath], {
       cwd: root,
       encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
+      stdio: ["ignore", "pipe", "pipe"],
     });
     return output.trim().length > 0;
-  } catch {
-    return false;
+  } catch (error) {
+    gitFailure("log", error);
   }
 }
 

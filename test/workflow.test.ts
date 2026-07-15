@@ -86,14 +86,75 @@ function spawnTestProcess(
   context: TestContext,
   script: string,
   environment: Record<string, string>,
-): { ready: Promise<unknown[]>; exit: Promise<unknown[]>; child: ReturnType<typeof spawn> } {
+): {
+  ready: Promise<void>;
+  exit: Promise<number | null>;
+  child: ReturnType<typeof spawn>;
+  stderr: () => string;
+} {
   const child = spawn(process.execPath, ["--input-type=module", "--eval", script], {
     env: { ...process.env, ...environment },
     stdio: ["ignore", "pipe", "pipe"],
   });
-  context.after(() => child.kill("SIGKILL"));
-  return { child, ready: once(child.stdout!, "data"), exit: once(child, "exit") };
+  let stderr = "";
+  child.stderr!.setEncoding("utf8");
+  child.stderr!.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+  const exit = new Promise<number | null>((resolve) => {
+    const timeout = setTimeout(() => {
+      stderr += "\nchild process timed out";
+      child.kill("SIGKILL");
+      resolve(null);
+    }, 30_000);
+    const finish = (code: number | null) => {
+      clearTimeout(timeout);
+      resolve(code);
+    };
+    child.once("error", () => finish(null));
+    child.once("exit", (code) => finish(code));
+  });
+  const ready = new Promise<void>((resolve, reject) => {
+    const finish = (error?: Error) => {
+      clearTimeout(timeout);
+      child.stdout!.off("data", onReady);
+      child.off("error", onError);
+      child.off("exit", onExit);
+      if (error) {
+        child.kill("SIGKILL");
+        reject(error);
+      } else {
+        resolve();
+      }
+    };
+    const onReady = () => finish();
+    const onError = (error: Error) => finish(new Error(`child process failed: ${error.message}\n${stderr}`));
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => finish(new Error(
+      `child exited before readiness (code ${code ?? "none"}, signal ${signal ?? "none"})\n${stderr}`,
+    ));
+    const timeout = setTimeout(() => finish(new Error(`timed out waiting for child readiness\n${stderr}`)), 10_000);
+    child.stdout!.once("data", onReady);
+    child.once("error", onError);
+    child.once("exit", onExit);
+  });
+  context.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      const closed = once(child, "close");
+      child.kill("SIGKILL");
+      await Promise.race([closed, delay(1_000)]);
+    }
+  });
+  return { child, ready, exit, stderr: () => stderr };
 }
+
+test("child readiness reports early failures without hanging", async (context) => {
+  const failed = spawnTestProcess(context, `
+    console.error("fixture failed before readiness");
+    process.exitCode = 2;
+  `, {});
+  await assert.rejects(failed.ready, /fixture failed before readiness/);
+  assert.equal(await failed.exit, 2);
+});
 
 test("protect, seal, lock, and unlock workflow", async (context) => {
   const root = await temporaryDirectory(context, "rolegit-workflow-");
@@ -446,7 +507,7 @@ test("concurrent initializers serialize across processes", async (context) => {
   assert.equal(children.every(({ child }) => child.exitCode === null), true);
   release();
   await holder;
-  const exitCodes = await Promise.all(children.map(async ({ exit }) => (await exit)[0]));
+  const exitCodes = await Promise.all(children.map(({ exit }) => exit));
   assert.deepEqual(exitCodes.sort(), [0, 1]);
   const policy = await loadEnclist(root);
   assert.deepEqual(await loadRepositoryServers(root), [policy.authServer]);
@@ -488,7 +549,7 @@ test("concurrent protect commands retain every policy update", async (context) =
   assert.equal(children.every(({ child }) => child.exitCode === null), true);
   release();
   await holder;
-  const exitCodes = await Promise.all(children.map(async ({ exit }) => (await exit)[0]));
+  const exitCodes = await Promise.all(children.map(({ exit }) => exit));
   assert.deepEqual(exitCodes, [0, 0, 0, 0]);
   assert.deepEqual(Object.keys((await loadEnclist(root)).files).sort(), protectedPaths.sort());
 });
@@ -551,14 +612,10 @@ test("a killed lock owner fails closed for every concurrent waiter", async (cont
       await new Promise(() => setInterval(() => undefined, 1_000));
     });
   `;
-  const child = spawn(process.execPath, ["--input-type=module", "--eval", script], {
-    env: { ...process.env, CHILD_ROOT: root, ROLEGIT_HOME: home },
-    stdio: ["ignore", "pipe", "inherit"],
-  });
-  context.after(() => child.kill("SIGKILL"));
-  await once(child.stdout!, "data");
-  child.kill("SIGKILL");
-  await once(child, "exit");
+  const owner = spawnTestProcess(context, script, { CHILD_ROOT: root, ROLEGIT_HOME: home });
+  await owner.ready;
+  owner.child.kill("SIGKILL");
+  await owner.exit;
 
   const session = localSession("http://127.0.0.1:8787", 101, "stale-lock-token");
   const results = await Promise.allSettled(
@@ -865,6 +922,65 @@ test("moving a checkout preserves cleanup ownership", async (context) => {
   await assert.rejects(() => stat(path.join(movedRoot, ".env")), { code: "ENOENT" });
   await assert.rejects(() => loadSession(movedRoot, url), /run `rolegit login` first/);
   await assert.rejects(() => loadLease(movedRoot), { code: "ENOENT" });
+});
+
+test("a checkout path alias retains cleanup ownership", async (context) => {
+  const parent = await temporaryDirectory(context, "rolegit-checkout-alias-");
+  const root = path.join(parent, "repository");
+  const alias = path.join(parent, "alias");
+  const home = path.join(parent, ".test-home");
+  process.env.ROLEGIT_HOME = home;
+  await mkdir(root);
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  const server = "http://127.0.0.1:8787";
+  const session = localSession(server, 101, "aliased-checkout-token");
+  const plaintext = Buffer.from("aliased checkout\n");
+  await initialize(root, server);
+  await saveSession(root, session);
+  await writeFile(path.join(root, ".env"), plaintext);
+  await saveLease(leaseFor(root, session, [{ path: ".env", digest: materializationDigest(plaintext) }]));
+  await symlink(root, alias, process.platform === "win32" ? "junction" : "dir");
+
+  assert.equal((await loadSession(alias, server)).token, session.token);
+  await lock(alias, false);
+  await assert.rejects(() => stat(path.join(root, ".env")), { code: "ENOENT" });
+  await assert.rejects(() => loadLease(root), { code: "ENOENT" });
+});
+
+test("relative RoleGit homes cannot change state namespace by working directory", async (context) => {
+  const parent = await temporaryDirectory(context, "rolegit-relative-home-");
+  const root = path.join(parent, "repository");
+  const subdirectory = path.join(root, "nested");
+  const home = path.join(root, ".rolegit-state");
+  process.env.ROLEGIT_HOME = home;
+  await mkdir(subdirectory, { recursive: true });
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  const server = "http://127.0.0.1:8787";
+  const session = localSession(server, 101, "relative-home-token");
+  const plaintext = Buffer.from("relative home materialization\n");
+  await initialize(root, server);
+  await saveSession(root, session);
+  await writeFile(path.join(root, ".env"), plaintext);
+  await saveLease(leaseFor(root, session, [{ path: ".env", digest: materializationDigest(plaintext) }]));
+  const moduleUrl = new URL("../src/commands.js", import.meta.url).href;
+  const script = `
+    import { lock } from ${JSON.stringify(moduleUrl)};
+    process.chdir(process.env.CHILD_CWD);
+    process.stdout.write("ready\\n");
+    await lock(process.env.CHILD_ROOT, false);
+  `;
+  const children = [root, subdirectory].map((cwd) => spawnTestProcess(context, script, {
+    CHILD_CWD: cwd,
+    CHILD_ROOT: root,
+    ROLEGIT_HOME: ".rolegit-state",
+  }));
+  await Promise.all(children.map(({ ready }) => ready));
+  assert.deepEqual(await Promise.all(children.map(({ exit }) => exit)), [1, 1]);
+  for (const child of children) assert.match(child.stderr(), /ROLEGIT_HOME must be an absolute path/);
+  assert.equal(await readFile(path.join(root, ".env"), "utf8"), plaintext.toString("utf8"));
+  assert.equal((await loadLease(root)).sessionId, sessionId(session));
+  assert.equal((await loadSession(root, server)).token, session.token);
+  await lock(root, false);
 });
 
 test("a copy made before materialization cannot consume the original lease", async (context) => {

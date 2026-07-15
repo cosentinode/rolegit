@@ -65,9 +65,16 @@ export function parseEnclist(value: unknown): Enclist {
   validateAuthServer(authServer);
   const rawFiles = object(root.files, "files");
   const files: Record<string, EnclistFile> = {};
+  const portablePaths = new Map<string, string>();
   for (const [rawPath, rawFile] of Object.entries(rawFiles)) {
     const protectedPath = normalizeProtectedPath(rawPath);
     if (files[protectedPath]) throw new Error(`duplicate protected path: ${protectedPath}`);
+    const portablePath = protectedPath.toLowerCase();
+    const alias = portablePaths.get(portablePath);
+    if (alias !== undefined && alias !== protectedPath) {
+      throw new Error(`protected paths differ only by case: ${alias}, ${protectedPath}`);
+    }
+    portablePaths.set(portablePath, protectedPath);
     const file = object(rawFile, `files.${protectedPath}`);
     const objectPath = normalizeProtectedPath(string(file.object, `files.${protectedPath}.object`));
     if (objectPath !== encryptedObjectPath(protectedPath)) {
@@ -132,8 +139,15 @@ export function parseServerPolicy(value: unknown): ServerPolicy {
     const vault = object(rawVault, `vaults.${vaultId}`);
     const rawFiles = object(vault.files, `vaults.${vaultId}.files`);
     const files: Record<string, AccessRule> = {};
+    const portablePaths = new Map<string, string>();
     for (const [rawPath, rawRule] of Object.entries(rawFiles)) {
       const protectedPath = normalizeProtectedPath(rawPath);
+      const portablePath = protectedPath.toLowerCase();
+      const alias = portablePaths.get(portablePath);
+      if (alias !== undefined && alias !== protectedPath) {
+        throw new Error(`protected paths differ only by case: ${alias}, ${protectedPath}`);
+      }
+      portablePaths.set(portablePath, protectedPath);
       files[protectedPath] = parseAccessRule(rawRule, `vaults.${vaultId}.files.${protectedPath}`);
     }
     vaults[vaultId] = {

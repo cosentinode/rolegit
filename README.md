@@ -138,15 +138,19 @@ replace an active local session; run `rolegit lock` first.
 
 RoleGit stores a checkout UUID in Git's private metadata so local cleanup ownership survives moving
 or renaming the checkout without being committed. The UUID is bound to one machine-local checkout
-root. If a filesystem copy duplicates it while the original still exists, RoleGit fails closed before
-accessing sessions, leases, or plaintext; remove any copied materialized plaintext before assigning
-the copy a fresh identity. Repository mutations, including `init` and `protect`, and session operations
-use machine-local lock files. A lock left by a terminated process is never removed automatically:
-commands fail with its path so the user can verify no RoleGit process is active before removing it.
+directory by filesystem identity, so aliases to that directory retain access while a distinct copy
+fails closed before accessing sessions, leases, or plaintext. Remove any copied materialized plaintext
+before assigning the copy a fresh identity. `ROLEGIT_HOME`, when set, must be absolute so commands from
+different working directories cannot select different state. Repository mutations, including `init`
+and `protect`, and session operations use machine-local lock files. A lock left by a terminated process
+is never removed automatically: commands fail with its path so the user can verify no RoleGit process
+is active before removing it.
 
 ## Current Scope
 
 - Exact protected paths; Git-ignore-style patterns are planned.
+- Protected paths reject Windows device names, alternate-data-stream syntax, trailing dots/spaces,
+  and policy entries that differ only by case so one policy remains safe across platforms.
 - Server state and sessions are in memory and disappear on restart.
 - The key-encryption key comes from `ROLEGIT_KEK`; production KMS integration is not implemented.
 - On POSIX systems, session tokens and materialized files are created with mode `0600`. Node's

@@ -15,6 +15,36 @@ test("normalizes repository-relative protected paths", () => {
   assert.throws(() => normalizeProtectedPath("/absolute"), /inside the repository/);
 });
 
+test("rejects non-portable Windows paths and case aliases", () => {
+  for (const unsafe of ["NUL", "con.txt", "secrets. ", "secrets.", "secrets:stream", "a?.env"]) {
+    assert.throws(() => normalizeProtectedPath(unsafe), /Windows/);
+  }
+  const files = {
+    "Config.env": { object: encryptedObjectPath("Config.env") },
+    "config.env": { object: encryptedObjectPath("config.env") },
+  };
+  assert.throws(() => parseEnclist({
+    version: 1,
+    vaultId: "vault",
+    authServer: "http://127.0.0.1:8787",
+    files,
+  }), /differ only by case/);
+  assert.throws(() => parseServerPolicy({
+    version: 1,
+    sessionMinutes: 60,
+    keyId: "dev",
+    vaults: {
+      vault: {
+        repository: "acme/project",
+        files: {
+          "Config.env": { users: [1], teams: [] },
+          "config.env": { users: [1], teams: [] },
+        },
+      },
+    },
+  }), /differ only by case/);
+});
+
 test("encrypted object paths are deterministic and opaque", () => {
   const objectPath = encryptedObjectPath(".env.production");
   assert.match(objectPath, /^\.rolegit\/vault\/[a-f0-9]{64}\.json$/);

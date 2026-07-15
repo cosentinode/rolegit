@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
-import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, realpath, rename, rm, stat } from "node:fs/promises";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
@@ -9,7 +9,27 @@ import { normalizeProtectedPath } from "./paths.js";
 import type { LocalSession, MaterializationLease, MaterializedFile } from "./types.js";
 
 function roleGitHome(): string {
-  return process.env.ROLEGIT_HOME ?? path.join(homedir(), ".config", "rolegit");
+  const configured = process.env.ROLEGIT_HOME;
+  if (configured !== undefined && !path.isAbsolute(configured)) {
+    throw new Error("ROLEGIT_HOME must be an absolute path");
+  }
+  return path.resolve(configured ?? path.join(homedir(), ".config", "rolegit"));
+}
+
+function pathNamesEqual(first: string, second: string): boolean {
+  return process.platform === "win32"
+    ? first.toLowerCase() === second.toLowerCase()
+    : first === second;
+}
+
+async function rootsEqual(first: string, second: string): Promise<boolean> {
+  const [firstReal, secondReal] = await Promise.all([realpath(first), realpath(second)]);
+  if (pathNamesEqual(firstReal, secondReal)) return true;
+  const [firstStat, secondStat] = await Promise.all([
+    stat(firstReal, { bigint: true }),
+    stat(secondReal, { bigint: true }),
+  ]);
+  return firstStat.ino !== 0n && firstStat.dev === secondStat.dev && firstStat.ino === secondStat.ino;
 }
 
 export function repositoryId(root: string): string {
@@ -160,20 +180,21 @@ async function withStateLock<T>(destination: string, operation: () => Promise<T>
 export function withRepositoryLock<T>(root: string, operation: () => Promise<T>): Promise<T> {
   const id = repositoryId(root);
   return withStateLock(`${leasePath(root)}.operation.lock`, async () => {
+    const currentRoot = await realpath(root);
     let metadata: RepositoryMetadata;
     try {
       metadata = await loadRepositoryMetadata(root);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      metadata = { repositoryId: id, root: path.resolve(root), servers: [] };
+      metadata = { repositoryId: id, root: currentRoot, servers: [] };
       await writePrivateJson(repositoryPath(root), metadata);
     }
-    const currentRoot = path.resolve(root);
-    if (metadata.root !== currentRoot) {
+    if (!pathNamesEqual(metadata.root, currentRoot)) {
       let duplicate = false;
       try {
-        await lstat(metadata.root);
-        duplicate = repositoryId(metadata.root) === id;
+        if (!(await rootsEqual(metadata.root, currentRoot))) {
+          duplicate = repositoryId(metadata.root) === id;
+        }
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
@@ -220,7 +241,7 @@ export async function saveRepositoryServerUnlocked(root: string, server: string)
   }
   await writePrivateJson(repositoryPath(root), {
     repositoryId: repositoryId(root),
-    root: path.resolve(root),
+    root: await realpath(root),
     servers: [...new Set([...servers, server])],
   });
 }
@@ -242,7 +263,7 @@ async function loadRepositoryMetadata(root: string): Promise<RepositoryMetadata>
   };
   if (
     parsed.repositoryId !== repositoryId(root) ||
-    typeof parsed.root !== "string" ||
+    typeof parsed.root !== "string" || !path.isAbsolute(parsed.root) ||
     !Array.isArray(parsed.servers) ||
     !parsed.servers.every((server) => typeof server === "string")
   ) {
@@ -259,14 +280,22 @@ async function assertRepositoryRoot(root: string): Promise<void> {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw error;
   }
-  if (metadata.root !== path.resolve(root)) {
+  let matches = false;
+  try {
+    matches = await rootsEqual(metadata.root, root);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (!matches) {
     throw new Error(`repository checkout identity is bound to another root (${metadata.root})`);
   }
 }
 
 export async function loadRepositoryServers(root: string): Promise<string[]> {
   const metadata = await loadRepositoryMetadata(root);
-  if (metadata.root !== path.resolve(root)) throw new Error("repository checkout identity is bound to another root");
+  if (!(await rootsEqual(metadata.root, root))) {
+    throw new Error("repository checkout identity is bound to another root");
+  }
   return metadata.servers;
 }
 

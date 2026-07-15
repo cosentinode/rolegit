@@ -65,6 +65,10 @@ async function protectUnlocked(root: string, inputPath: string): Promise<void> {
   if (protectedPath === ".enclist" || protectedPath.startsWith(".rolegit/")) {
     throw new Error("RoleGit metadata cannot be protected");
   }
+  const policy = await loadEnclist(root);
+  const caseAlias = Object.keys(policy.files).find((entry) =>
+    entry !== protectedPath && entry.toLowerCase() === protectedPath.toLowerCase());
+  if (caseAlias) throw new Error(`${protectedPath} differs only by case from protected path ${caseAlias}`);
   if (gitPathIsTracked(root, protectedPath)) {
     throw new Error(`${protectedPath} is already tracked; remove it from Git history before protecting it`);
   }
@@ -76,7 +80,6 @@ async function protectUnlocked(root: string, inputPath: string): Promise<void> {
   if (!gitPathIsIgnored(root, protectedPath)) {
     throw new Error(`failed to ignore plaintext path ${protectedPath}`);
   }
-  const policy = await loadEnclist(root);
   policy.files[protectedPath] = { object: encryptedObjectPath(protectedPath) };
   await saveEnclist(root, policy);
   console.log(`Protected ${protectedPath}`);
