@@ -144,18 +144,22 @@ modified paths.
 RoleGit stores a checkout UUID in Git's private metadata so local cleanup ownership survives moving
 or renaming the checkout without being committed. The UUID is bound to one machine-local checkout
 directory by filesystem identity, so aliases to that directory retain access while a distinct copy
-fails closed before accessing sessions, leases, or plaintext. Remove any copied materialized plaintext
-before assigning the copy a fresh identity. `ROLEGIT_HOME`, when set, must be absolute and outside the
-current worktree so commands cannot select repository-stageable control state or change namespaces by
-working directory. Repository mutations, including `init` and `protect`, and session operations use
-machine-local lock files. A lock left by a terminated process is never removed automatically: commands
-fail with its path so the user can verify no RoleGit process is active before removing it.
+fails closed before accessing sessions, leases, or plaintext. Expiry watchers use that UUID and the
+machine-local registry rather than a fixed path; a same-parent rename is rediscovered automatically,
+while an unlocatable move retains the lease and a persistent warning for the next command. Remove any
+copied materialized plaintext before assigning the copy a fresh identity. `ROLEGIT_HOME`, when set,
+must be absolute and outside the current worktree so commands cannot select repository-stageable
+control state or change namespaces by working directory. Repository mutations, including `init` and
+`protect`, and session operations use machine-local lock files. A lock left by a terminated process is
+never removed automatically: commands fail with its path so the user can verify no RoleGit process is
+active before removing it.
 
 ## Current Scope
 
 - Exact protected paths; Git-ignore-style patterns are planned.
 - Protected paths reject Windows device names, alternate-data-stream syntax, trailing dots/spaces,
-  `.gitignore`, Git/RoleGit metadata namespaces, multiply-linked files, and portable
+  `.gitignore`, active Git directories/index/object/shallow/config metadata, RoleGit metadata
+  namespaces, multiply-linked files, and portable
   policy/Git/worktree aliases. Unicode collision keys use NFC and locale-independent,
   one-code-point uppercase/lowercase folding; generated ignore rules expand the same aliases.
   Multi-character case mappings and paths requiring more than 1,024 ignore alternatives are

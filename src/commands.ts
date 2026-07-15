@@ -12,7 +12,7 @@ import {
   gitPathIsIgnored,
   gitPathExistsInHistory,
   gitPathIsTracked,
-  gitMetadataPath,
+  gitMetadataPaths,
   existingPortablePathAlias,
   materializationDigest,
   removeMaterializedFile,
@@ -27,6 +27,7 @@ import {
 } from "./policy.js";
 import { portablePathKey } from "./paths.js";
 import {
+  clearExpiryCleanupError,
   deleteLeaseUnlocked,
   deleteSessionUnlocked,
   loadLease,
@@ -34,7 +35,9 @@ import {
   loadSessionUnlocked,
   repositoryId,
   refreshLeaseMaterializationUnlocked,
+  recordExpiryCleanupError,
   replaceLeaseMaterializationsUnlocked,
+  resolveRepositoryRoot,
   roleGitMetadataPath,
   saveLeaseUnlocked,
   saveRepositoryServerUnlocked,
@@ -69,7 +72,7 @@ async function protectUnlocked(root: string, inputPath: string): Promise<void> {
   const relativeInput = path.isAbsolute(inputPath) ? path.relative(root, inputPath) : inputPath;
   const protectedPath = normalizePlaintextPath(relativeInput);
   const portablePath = portablePathKey(protectedPath);
-  const metadataNamespaces = [gitMetadataPath(root), roleGitMetadataPath(root)]
+  const metadataNamespaces = [...gitMetadataPaths(root), roleGitMetadataPath(root)]
     .filter((entry): entry is string => entry !== undefined)
     .map(portablePathKey);
   if (metadataNamespaces.some((entry) =>
@@ -379,7 +382,10 @@ async function lockUnlocked(root: string, logout: boolean): Promise<void> {
 }
 
 export function lock(root: string, logout = true): Promise<void> {
-  return withRepositoryLock(root, () => lockUnlocked(root, logout));
+  return withRepositoryLock(root, async () => {
+    await lockUnlocked(root, logout);
+    await clearExpiryCleanupError(repositoryId(root));
+  });
 }
 
 export function expiryWatcherDelay(expiresAt: string, now = Date.now()): number {
@@ -388,38 +394,63 @@ export function expiryWatcherDelay(expiresAt: string, now = Date.now()): number 
   return Math.min(MAX_TIMER_DELAY, Math.max(0, expiration - now + 250));
 }
 
-export async function lockIfSessionExpired(root: string, expectedExpiry: string): Promise<void> {
-  const watchedLease = await withRepositoryLock(root, () => loadLease(root));
-  let expiry = expectedExpiry;
-  while (true) {
-    const delay = expiryWatcherDelay(expiry);
-    await new Promise((resolve) => setTimeout(resolve, delay));
-    const nextExpiry = await withRepositoryLock(root, async () => {
-      let lease: MaterializationLease;
-      try {
-        lease = await loadLease(root);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-        throw error;
-      }
-      if (lease.sessionId !== watchedLease.sessionId) return undefined;
-      let current: LocalSession;
-      try {
-        current = await loadSessionUnlocked(root, lease.server);
-      } catch {
-        const failures = await cleanupLease(root, lease, false, true);
-        if (failures.length > 0) throw cleanupError("expiry cleanup completed with errors", failures);
-        return undefined;
-      }
-      if (current.user.id !== lease.userId || sessionId(current) !== lease.sessionId) {
-        const failures = await cleanupLease(root, lease, false, true);
-        if (failures.length > 0) throw cleanupError("expiry cleanup completed with errors", failures);
-        return undefined;
-      }
-      return current.expiresAt;
-    });
-    if (!nextExpiry) return;
-    expiry = nextExpiry;
+async function withResolvedRepositoryLock<T>(
+  repositoryIdentity: string,
+  operation: (root: string) => Promise<T>,
+): Promise<T> {
+  const root = await resolveRepositoryRoot(repositoryIdentity);
+  try {
+    return await withRepositoryLock(root, () => operation(root));
+  } catch (error) {
+    const retryRoot = await resolveRepositoryRoot(repositoryIdentity);
+    if (path.resolve(retryRoot) === path.resolve(root)) throw error;
+    return withRepositoryLock(retryRoot, () => operation(retryRoot));
+  }
+}
+
+export async function lockIfSessionExpired(rootOrIdentity: string, expectedExpiry: string): Promise<void> {
+  const repositoryIdentity = path.isAbsolute(rootOrIdentity) ? repositoryId(rootOrIdentity) : rootOrIdentity;
+  try {
+    const watchedLease = await withResolvedRepositoryLock(repositoryIdentity, loadLease);
+    let expiry = expectedExpiry;
+    while (true) {
+      const delay = expiryWatcherDelay(expiry);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      const nextExpiry = await withResolvedRepositoryLock(repositoryIdentity, async (root) => {
+        let lease: MaterializationLease;
+        try {
+          lease = await loadLease(root);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+          throw error;
+        }
+        if (lease.sessionId !== watchedLease.sessionId) return undefined;
+        let current: LocalSession;
+        try {
+          current = await loadSessionUnlocked(root, lease.server);
+        } catch {
+          const failures = await cleanupLease(root, lease, false, true);
+          if (failures.length > 0) throw cleanupError("expiry cleanup completed with errors", failures);
+          return undefined;
+        }
+        if (current.user.id !== lease.userId || sessionId(current) !== lease.sessionId) {
+          const failures = await cleanupLease(root, lease, false, true);
+          if (failures.length > 0) throw cleanupError("expiry cleanup completed with errors", failures);
+          return undefined;
+        }
+        return current.expiresAt;
+      });
+      if (!nextExpiry) break;
+      expiry = nextExpiry;
+    }
+    await clearExpiryCleanupError(repositoryIdentity);
+  } catch (error) {
+    try {
+      await recordExpiryCleanupError(repositoryIdentity, error);
+    } catch (recordError) {
+      throw new AggregateError([error, recordError], "expiry cleanup failed and its error could not be persisted");
+    }
+    throw error;
   }
 }
 

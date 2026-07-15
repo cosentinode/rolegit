@@ -25,6 +25,7 @@ import { loadEnclist, saveEnclist } from "../src/policy.js";
 import {
   deleteSession,
   loadLease,
+  loadExpiryCleanupError,
   loadRepositoryServers,
   loadSession,
   repositoryId,
@@ -476,6 +477,68 @@ test("stale watcher leaves a replacement session lease and materialization intac
   await watcher;
   assert.equal(await readFile(path.join(root, ".env"), "utf8"), original.toString("utf8"));
   assert.equal((await loadLease(root)).sessionId, sessionId(newSession));
+});
+
+test("expiry watcher follows a checkout renamed before cleanup", async (context) => {
+  const parent = await temporaryDirectory(context, "rolegit-moved-watcher-");
+  const root = path.join(parent, "before");
+  const movedRoot = path.join(parent, "after");
+  process.env.ROLEGIT_HOME = path.join(parent, ".test-home");
+  await mkdir(root);
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  const expiresAt = new Date(Date.now() + 150).toISOString();
+  const session = localSession("http://127.0.0.1:8787", 101, "moved-watcher-token", expiresAt);
+  const plaintext = Buffer.from("moved watcher materialization\n");
+  await initialize(root, session.server);
+  await saveSession(root, session);
+  await writeFile(path.join(root, ".env"), plaintext);
+  await saveLease(leaseFor(root, session, [{ path: ".env", digest: materializationDigest(plaintext) }]));
+  const identity = repositoryId(root);
+  const watcher = lockIfSessionExpired(identity, expiresAt);
+  await delay(50);
+  await rename(root, movedRoot);
+
+  await watcher;
+  await assert.rejects(() => stat(path.join(movedRoot, ".env")), { code: "ENOENT" });
+  await assert.rejects(() => loadLease(movedRoot), { code: "ENOENT" });
+});
+
+test("unresolved watcher moves retain the lease and a durable visible error", async (context) => {
+  const parent = await temporaryDirectory(context, "rolegit-unresolved-watcher-");
+  const root = path.join(parent, "before");
+  const destinationParent = path.join(parent, "nested");
+  const movedRoot = path.join(destinationParent, "after");
+  process.env.ROLEGIT_HOME = path.join(parent, ".test-home");
+  await mkdir(root);
+  await mkdir(destinationParent);
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  const expiresAt = new Date(Date.now() + 150).toISOString();
+  const session = localSession("http://127.0.0.1:8787", 101, "unresolved-watcher-token", expiresAt);
+  const plaintext = Buffer.from("unresolved watcher materialization\n");
+  await initialize(root, session.server);
+  await saveSession(root, session);
+  await writeFile(path.join(root, ".env"), plaintext);
+  await saveLease(leaseFor(root, session, [{ path: ".env", digest: materializationDigest(plaintext) }]));
+  const identity = repositoryId(root);
+  const watcher = lockIfSessionExpired(identity, expiresAt);
+  await delay(50);
+  await rename(root, movedRoot);
+
+  await assert.rejects(() => watcher, /expiry cleanup remains pending/);
+  assert.match((await loadExpiryCleanupError(identity)).message, /expiry cleanup remains pending/);
+  assert.equal(await readFile(path.join(movedRoot, ".env"), "utf8"), plaintext.toString("utf8"));
+  const originalConsoleError = console.error;
+  let warning = "";
+  console.error = (...values: unknown[]) => {
+    warning += values.join(" ");
+  };
+  try {
+    await lock(movedRoot, false);
+  } finally {
+    console.error = originalConsoleError;
+  }
+  assert.match(warning, /previous expiry cleanup failed.*expiry cleanup remains pending/);
+  await assert.rejects(() => loadExpiryCleanupError(identity), { code: "ENOENT" });
 });
 
 test("unlock cleans an unchanged lease after offline session expiry", async (context) => {

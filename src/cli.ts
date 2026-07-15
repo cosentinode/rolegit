@@ -18,6 +18,7 @@ import {
 import { repositoryRoot } from "./files.js";
 import { GitHubAppClient } from "./github.js";
 import { loadEnclist, parseServerPolicy } from "./policy.js";
+import { repositoryId } from "./session.js";
 
 function option(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
@@ -128,7 +129,7 @@ async function main(): Promise<void> {
   }
   if (command === "unlock") {
     const session = await unlock(root, args);
-    const child = spawn(process.execPath, [process.argv[1]!, "__expire", root, session.expiresAt], {
+    const child = spawn(process.execPath, [process.argv[1]!, "__expire", repositoryId(root), session.expiresAt], {
       detached: true,
       stdio: "ignore",
     });

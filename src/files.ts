@@ -45,7 +45,49 @@ function listedGitPaths(root: string, args: string[], operation: string): string
   }
 }
 
-export function gitMetadataPath(root: string): string | undefined {
+function realpathWithMissingSuffix(target: string): string {
+  let existing = target;
+  const suffix: string[] = [];
+  while (true) {
+    try {
+      return path.join(realpathSync.native(existing), ...suffix);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const parent = path.dirname(existing);
+      if (parent === existing) throw error;
+      suffix.unshift(path.basename(existing));
+      existing = parent;
+    }
+  }
+}
+
+function worktreeMetadataPath(root: string, candidate: string): string | undefined {
+  const resolvedRoot = path.resolve(root);
+  const resolvedCandidate = path.resolve(root, candidate);
+  const lexical = path.relative(resolvedRoot, resolvedCandidate);
+  if (lexical === "") return ".";
+  if (!path.isAbsolute(lexical) && lexical !== ".." && !lexical.startsWith(`..${path.sep}`)) {
+    return lexical.split(path.sep).join("/");
+  }
+  const relative = path.relative(realpathSync.native(resolvedRoot), realpathWithMissingSuffix(resolvedCandidate));
+  if (relative === "") return ".";
+  if (path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`)) return undefined;
+  return relative.split(path.sep).join("/");
+}
+
+function gitPath(root: string, args: string[]): string {
+  try {
+    return execFileSync("git", ["rev-parse", ...args], {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch (error) {
+    gitFailure(`rev-parse ${args.join(" ")}`, error);
+  }
+}
+
+export function gitMetadataPaths(root: string): string[] {
   let hasGitEntry = true;
   try {
     lstatSync(path.join(root, ".git"));
@@ -53,23 +95,32 @@ export function gitMetadataPath(root: string): string | undefined {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     hasGitEntry = false;
   }
-  if (!hasGitEntry && process.env.GIT_DIR === undefined && process.env.GIT_WORK_TREE === undefined) return undefined;
-  let gitDirectory: string;
-  try {
-    gitDirectory = execFileSync("git", ["rev-parse", "--absolute-git-dir"], {
-      cwd: root,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
-  } catch (error) {
-    gitFailure("rev-parse", error);
+  if (!hasGitEntry && process.env.GIT_DIR === undefined && process.env.GIT_WORK_TREE === undefined) return [];
+  const candidates = [
+    gitPath(root, ["--absolute-git-dir"]),
+    gitPath(root, ["--git-common-dir"]),
+    gitPath(root, ["--git-path", "index"]),
+    gitPath(root, ["--git-path", "objects"]),
+    gitPath(root, ["--git-path", "shallow"]),
+    gitPath(root, ["--git-path", "info/grafts"]),
+  ];
+  for (const name of [
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_SHALLOW_FILE",
+    "GIT_GRAFT_FILE",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+  ]) {
+    const value = process.env[name];
+    if (value) candidates.push(value);
   }
-  const canonicalRoot = realpathSync.native(root);
-  const canonicalGitDirectory = realpathSync.native(gitDirectory);
-  const relative = path.relative(canonicalRoot, canonicalGitDirectory);
-  if (relative === "") return ".";
-  if (path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`)) return undefined;
-  return relative.split(path.sep).join("/");
+  if (process.env.GIT_ALTERNATE_OBJECT_DIRECTORIES) {
+    candidates.push(...process.env.GIT_ALTERNATE_OBJECT_DIRECTORIES.split(path.delimiter).filter(Boolean));
+  }
+  return [...new Set(candidates
+    .map((candidate) => worktreeMetadataPath(root, candidate))
+    .filter((entry): entry is string => entry !== undefined))];
 }
 
 export async function existingPortablePathAlias(root: string, relativePath: string): Promise<string | undefined> {

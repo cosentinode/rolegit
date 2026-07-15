@@ -224,6 +224,24 @@ test("protect excludes environment-selected in-worktree Git metadata", async (co
   await assert.rejects(() => protect(root, "CONTROL/config"), /metadata cannot be protected/);
 });
 
+test("protect excludes an environment-selected in-worktree Git index", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-environment-git-index-");
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  const previousIndex = process.env.GIT_INDEX_FILE;
+  process.env.GIT_INDEX_FILE = path.join(root, "control", "index");
+  context.after(() => {
+    if (previousIndex === undefined) delete process.env.GIT_INDEX_FILE;
+    else process.env.GIT_INDEX_FILE = previousIndex;
+  });
+  await initialize(root, "http://127.0.0.1:8787");
+
+  await assert.rejects(() => protect(root, "CONTROL/index"), /metadata cannot be protected/);
+  const policy = await loadEnclist(root);
+  policy.files["control/index"] = { object: encryptedObjectPath("control/index") };
+  await writeFile(path.join(root, ".enclist"), `${JSON.stringify(policy)}\n`);
+  await assert.rejects(() => loadEnclist(root), /metadata cannot be protected/);
+});
+
 test("prototype-named plaintext paths remain ordinary policy entries", async (context) => {
   const root = await temporaryDirectory(context, "rolegit-prototype-names-");
   execFileSync("git", ["init", "--quiet"], { cwd: root });

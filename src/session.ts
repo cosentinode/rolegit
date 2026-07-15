@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
-import { lstat, mkdir, open, readFile, realpath, rename, rm, stat } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat } from "node:fs/promises";
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { gitMetadataPath } from "./files.js";
+import { gitMetadataPaths } from "./files.js";
 import { normalizePlaintextPath, portablePathKey } from "./paths.js";
 import type { LocalSession, MaterializationLease, MaterializedFile } from "./types.js";
 
@@ -113,20 +113,36 @@ function sessionPath(root: string, server: string): string {
   return path.join(roleGitHome(), "sessions", `${id}.json`);
 }
 
+function repositoryStateId(repositoryIdentity: string): string {
+  return createHash("sha256").update(repositoryIdentity).digest("hex");
+}
+
 function leasePath(root: string): string {
-  const id = createHash("sha256").update(repositoryId(root)).digest("hex");
-  return path.join(roleGitHome(), "leases", `${id}.json`);
+  return path.join(roleGitHome(), "leases", `${repositoryStateId(repositoryId(root))}.json`);
+}
+
+function repositoryPathForId(repositoryIdentity: string): string {
+  return path.join(roleGitHome(), "repositories", `${repositoryStateId(repositoryIdentity)}.json`);
 }
 
 function repositoryPath(root: string): string {
-  const id = createHash("sha256").update(repositoryId(root)).digest("hex");
-  return path.join(roleGitHome(), "repositories", `${id}.json`);
+  return repositoryPathForId(repositoryId(root));
+}
+
+function expiryErrorPath(repositoryIdentity: string): string {
+  return path.join(roleGitHome(), "expiry-errors", `${repositoryStateId(repositoryIdentity)}.json`);
 }
 
 interface RepositoryMetadata {
   repositoryId: string;
   root: string;
   servers: string[];
+}
+
+interface ExpiryCleanupError {
+  repositoryId: string;
+  message: string;
+  recordedAt: string;
 }
 
 async function writePrivateJson(destination: string, value: unknown): Promise<void> {
@@ -245,6 +261,12 @@ export function withRepositoryLock<T>(root: string, operation: () => Promise<T>)
       }
       await writePrivateJson(repositoryPath(root), { ...metadata, root: currentRoot });
     }
+    try {
+      const failure = await loadExpiryCleanupError(id);
+      console.error(`warning: previous expiry cleanup failed: ${failure.message}`);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
     return operation();
   });
 }
@@ -289,8 +311,8 @@ export function saveRepositoryServer(root: string, server: string): Promise<void
   return withRepositoryLock(root, () => saveRepositoryServerUnlocked(root, server));
 }
 
-async function loadRepositoryMetadata(root: string): Promise<RepositoryMetadata> {
-  const source = repositoryPath(root);
+async function loadRepositoryMetadataById(repositoryIdentity: string): Promise<RepositoryMetadata> {
+  const source = repositoryPathForId(repositoryIdentity);
   const repositoryStat = await lstat(source);
   if (repositoryStat.isSymbolicLink() || !repositoryStat.isFile()) {
     throw new Error("refusing non-regular repository session metadata");
@@ -301,7 +323,7 @@ async function loadRepositoryMetadata(root: string): Promise<RepositoryMetadata>
     servers?: unknown;
   };
   if (
-    parsed.repositoryId !== repositoryId(root) ||
+    parsed.repositoryId !== repositoryIdentity ||
     typeof parsed.root !== "string" || !path.isAbsolute(parsed.root) ||
     !Array.isArray(parsed.servers) ||
     !parsed.servers.every((server) => typeof server === "string")
@@ -309,6 +331,85 @@ async function loadRepositoryMetadata(root: string): Promise<RepositoryMetadata>
     throw new Error("invalid repository session metadata");
   }
   return parsed as RepositoryMetadata;
+}
+
+async function loadRepositoryMetadata(root: string): Promise<RepositoryMetadata> {
+  return loadRepositoryMetadataById(repositoryId(root));
+}
+
+function existingCheckoutId(root: string): string | undefined {
+  let marker: string;
+  try {
+    const prefix = execFileSync("git", ["rev-parse", "--show-prefix"], {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (prefix !== "") return undefined;
+    marker = path.resolve(root, execFileSync("git", ["rev-parse", "--git-path", "rolegit-id"], {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim());
+  } catch {
+    return undefined;
+  }
+  try {
+    const value = readFileSync(marker, "utf8").trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(value)) throw new Error("invalid RoleGit checkout identity");
+    return value;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+export async function resolveRepositoryRoot(repositoryIdentity: string): Promise<string> {
+  const metadata = await loadRepositoryMetadataById(repositoryIdentity);
+  try {
+    if (repositoryId(metadata.root) === repositoryIdentity) return await realpath(metadata.root);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const parent = path.dirname(metadata.root);
+  let entries;
+  try {
+    entries = await readdir(parent, { withFileTypes: true });
+  } catch (error) {
+    throw new Error(`cannot locate checkout ${repositoryIdentity}; expiry cleanup remains pending`, { cause: error });
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+    const candidate = path.join(parent, entry.name);
+    if (existingCheckoutId(candidate) === repositoryIdentity) return realpath(candidate);
+  }
+  throw new Error(`cannot locate checkout ${repositoryIdentity}; expiry cleanup remains pending`);
+}
+
+export async function recordExpiryCleanupError(repositoryIdentity: string, error: unknown): Promise<void> {
+  await writePrivateJson(expiryErrorPath(repositoryIdentity), {
+    repositoryId: repositoryIdentity,
+    message: (error as Error).message,
+    recordedAt: new Date().toISOString(),
+  });
+}
+
+export async function loadExpiryCleanupError(repositoryIdentity: string): Promise<ExpiryCleanupError> {
+  const source = expiryErrorPath(repositoryIdentity);
+  const sourceStat = await lstat(source);
+  if (sourceStat.isSymbolicLink() || !sourceStat.isFile()) throw new Error("refusing non-regular expiry error");
+  const parsed = JSON.parse(await readFile(source, "utf8")) as Partial<ExpiryCleanupError>;
+  if (
+    parsed.repositoryId !== repositoryIdentity ||
+    typeof parsed.message !== "string" ||
+    typeof parsed.recordedAt !== "string" ||
+    !Number.isFinite(new Date(parsed.recordedAt).getTime())
+  ) throw new Error("invalid expiry cleanup error");
+  return parsed as ExpiryCleanupError;
+}
+
+export async function clearExpiryCleanupError(repositoryIdentity: string): Promise<void> {
+  await rm(expiryErrorPath(repositoryIdentity), { force: true });
 }
 
 async function assertRepositoryRoot(root: string): Promise<void> {
@@ -427,7 +528,7 @@ function normalizeMaterializedFile(value: unknown, root?: string): MaterializedF
   const protectedPath = normalizePlaintextPath(file.path);
   const metadataPaths = root === undefined
     ? []
-    : [gitMetadataPath(root), roleGitMetadataPath(root)]
+    : [...gitMetadataPaths(root), roleGitMetadataPath(root)]
       .filter((entry): entry is string => entry !== undefined)
       .map(portablePathKey);
   const portablePath = portablePathKey(protectedPath);

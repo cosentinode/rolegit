@@ -10,7 +10,7 @@ import type {
   ServerPolicy,
   TeamRule,
 } from "./types.js";
-import { atomicWrite, gitMetadataPath } from "./files.js";
+import { atomicWrite, gitMetadataPaths } from "./files.js";
 import { normalizePlaintextPath, normalizeProtectedPath, portablePathKey } from "./paths.js";
 import { roleGitMetadataPath } from "./session.js";
 
@@ -87,7 +87,7 @@ export function parseEnclist(value: unknown): Enclist {
 }
 
 function assertNoRepositoryMetadataFiles(root: string, policy: Enclist): void {
-  const metadataPaths = [gitMetadataPath(root), roleGitMetadataPath(root)]
+  const metadataPaths = [...gitMetadataPaths(root), roleGitMetadataPath(root)]
     .filter((entry): entry is string => entry !== undefined)
     .map(portablePathKey);
   for (const protectedPath of Object.keys(policy.files)) {
