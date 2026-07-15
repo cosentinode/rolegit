@@ -2,6 +2,8 @@ import { execFileSync } from "node:child_process";
 import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import path from "node:path";
 
+import { normalizeProtectedPath } from "./paths.js";
+
 export function repositoryRoot(cwd = process.cwd()): string {
   try {
     return execFileSync("git", ["rev-parse", "--show-toplevel"], {
@@ -106,6 +108,7 @@ export async function atomicWrite(destination: string, data: Buffer, mode: numbe
 }
 
 export async function removeMaterializedFile(root: string, relativePath: string): Promise<void> {
-  await assertNoSymlinkPath(root, relativePath);
-  await rm(path.join(root, relativePath), { force: true });
+  const normalized = normalizeProtectedPath(relativePath);
+  await assertNoSymlinkPath(root, normalized);
+  await rm(path.join(root, normalized), { force: true });
 }

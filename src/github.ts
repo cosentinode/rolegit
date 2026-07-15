@@ -89,7 +89,7 @@ export async function isActiveTeamMember(
 
 export function createGitHubAppJwt(
   privateKey: KeyObject,
-  clientId = OFFICIAL_GITHUB_APP.clientId,
+  clientId: string = OFFICIAL_GITHUB_APP.clientId,
   now = Math.floor(Date.now() / 1000),
 ): string {
   const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
@@ -115,7 +115,10 @@ export class GitHubAppClient {
   private readonly privateKey: KeyObject;
   private readonly tokens = new Map<string, { token: string; expiresAt: number }>();
 
-  constructor(privateKeyPem: string | Buffer, private readonly clientId = OFFICIAL_GITHUB_APP.clientId) {
+  constructor(
+    privateKeyPem: string | Buffer,
+    private readonly clientId: string = OFFICIAL_GITHUB_APP.clientId,
+  ) {
     this.privateKey = createPrivateKey(privateKeyPem);
   }
 

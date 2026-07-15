@@ -118,15 +118,7 @@ export async function seal(root: string, requested: string[]): Promise<void> {
 
 export async function unlock(root: string, requested: string[]): Promise<LocalSession> {
   const policy = await loadEnclist(root);
-  let session: LocalSession;
-  try {
-    session = await loadSession(policy.authServer);
-  } catch (error) {
-    for (const protectedPath of Object.keys(policy.files)) {
-      await removeMaterializedFile(root, protectedPath);
-    }
-    throw error;
-  }
+  const session = await loadSession(policy.authServer);
   const client = new AuthClient(policy.authServer);
   const materialized: string[] = [];
   try {
@@ -185,27 +177,20 @@ export async function unlock(root: string, requested: string[]): Promise<LocalSe
 }
 
 export async function lock(root: string, logout = true): Promise<void> {
-  const lease = await loadLease(root).catch(() => undefined);
-  let server = lease?.server;
-  let protectedPaths = lease?.paths;
-  if (!server || !protectedPaths) {
-    const policy = await loadEnclist(root);
-    server = policy.authServer;
-    protectedPaths = Object.keys(policy.files);
-  }
-  for (const protectedPath of protectedPaths) {
+  const lease = await loadLease(root);
+  for (const protectedPath of lease.paths) {
     await removeMaterializedFile(root, protectedPath);
     console.log(`Locked ${protectedPath}`);
   }
   await deleteLease(root);
   if (logout) {
     try {
-      const session = await loadSession(server);
-      await new AuthClient(server).logout(session).catch(() => undefined);
+      const session = await loadSession(lease.server);
+      await new AuthClient(lease.server).logout(session).catch(() => undefined);
     } catch {
       // Local cleanup must still succeed if the service or session is unavailable.
     }
-    await deleteSession(server);
+    await deleteSession(lease.server);
   }
 }
 

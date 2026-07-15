@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import path from "node:path";
 
+import { normalizeProtectedPath } from "./paths.js";
 import type { LocalSession, MaterializationLease } from "./types.js";
 
 function roleGitHome(): string {
@@ -110,7 +111,7 @@ export async function loadLease(root: string): Promise<MaterializationLease> {
     !Array.isArray(lease.paths) ||
     !lease.paths.every((entry) => typeof entry === "string")
   ) throw new Error("invalid materialization lease");
-  return lease as MaterializationLease;
+  return { ...(lease as MaterializationLease), paths: lease.paths.map(normalizeProtectedPath) };
 }
 
 export async function deleteLease(root: string): Promise<void> {

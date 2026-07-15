@@ -8,12 +8,15 @@
   },
   "files": [
     "dist/src",
+    "docs/security.md",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "server-policy.example.json"
   ],
   "scripts": {
     "build": "tsc",
     "clean": "rm -rf dist",
+    "prepack": "npm run build",
     "test": "npm run build && node --test dist/test/*.test.js",
     "start": "node dist/src/cli.js"
   },

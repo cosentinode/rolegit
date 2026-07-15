@@ -11,6 +11,9 @@ import type {
   TeamRule,
 } from "./types.js";
 import { atomicWrite } from "./files.js";
+import { normalizeProtectedPath } from "./paths.js";
+
+export { normalizeProtectedPath } from "./paths.js";
 
 export const ENCLIST_NAME = ".enclist";
 
@@ -35,24 +38,6 @@ function positiveInteger(value: unknown, label: string): number {
   return value as number;
 }
 
-export function normalizeProtectedPath(value: string): string {
-  if (value.includes("\0") || value.includes("\n") || value.includes("\r")) {
-    throw new Error("protected path contains unsupported characters");
-  }
-  const slashPath = value.replaceAll("\\", "/");
-  const normalized = path.posix.normalize(slashPath);
-  if (
-    normalized === "." ||
-    path.posix.isAbsolute(normalized) ||
-    normalized === ".." ||
-    normalized.startsWith("../") ||
-    /^[A-Za-z]:\//.test(normalized)
-  ) {
-    throw new Error(`protected path must stay inside the repository: ${value}`);
-  }
-  return normalized;
-}
-
 export function encryptedObjectPath(protectedPath: string): string {
   const digest = createHash("sha256").update(protectedPath).digest("hex");
   return `.rolegit/vault/${digest}.json`;
@@ -65,7 +50,7 @@ export function createEnclist(authServer: string): Enclist {
 
 export function validateAuthServer(value: string): void {
   const url = new URL(value);
-  const loopback = ["127.0.0.1", "localhost", "::1"].includes(url.hostname);
+  const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
   if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
     throw new Error("authorization server must use HTTPS unless it is on loopback");
   }

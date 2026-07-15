@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readdir, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import { initialize, protect } from "../src/commands.js";
-import { atomicWrite } from "../src/files.js";
+import { atomicWrite, removeMaterializedFile } from "../src/files.js";
 
 test("failed atomic writes remove temporary files", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "rolegit-atomic-"));
@@ -40,4 +40,15 @@ test("protect refuses a symlinked gitignore", async () => {
   await symlink(target, path.join(root, ".gitignore"));
 
   await assert.rejects(() => protect(root, ".env"), /non-regular \.gitignore/);
+});
+
+test("materialized-file removal refuses paths outside the repository", async () => {
+  const parent = await mkdtemp(path.join(tmpdir(), "rolegit-removal-"));
+  const root = path.join(parent, "repository");
+  execFileSync("mkdir", [root]);
+  const outside = path.join(parent, "outside");
+  await writeFile(outside, "keep me\n");
+
+  await assert.rejects(() => removeMaterializedFile(root, "../outside"), /inside the repository/);
+  assert.equal(await readFile(outside, "utf8"), "keep me\n");
 });

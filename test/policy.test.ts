@@ -23,6 +23,7 @@ test("encrypted object paths are deterministic and opaque", () => {
 test("enclist only permits loopback HTTP", () => {
   const base = { version: 1, vaultId: "vault", files: {} };
   assert.doesNotThrow(() => parseEnclist({ ...base, authServer: "http://127.0.0.1:8787" }));
+  assert.doesNotThrow(() => parseEnclist({ ...base, authServer: "http://[::1]:8787" }));
   assert.throws(
     () => parseEnclist({ ...base, authServer: "http://example.com" }),
     /must use HTTPS/,

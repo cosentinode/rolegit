@@ -73,7 +73,7 @@ async function main(): Promise<void> {
     const policy = parseServerPolicy(JSON.parse(await readFile(path.resolve(policyPath), "utf8")));
     const githubAppKeyPath = process.env.ROLEGIT_GITHUB_APP_KEY;
     const githubApp = githubAppKeyPath
-      ? new GitHubAppClient(await readFile(path.resolve(githubAppKeyPath)))
+      ? new GitHubAppClient(await readFile(path.resolve(githubAppKeyPath)), policy.githubClientId)
       : undefined;
     const server = createAuthServer({
       policy,
