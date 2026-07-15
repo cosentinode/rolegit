@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -29,6 +29,7 @@ import {
   loadRepositoryServers,
   loadSession,
   repositoryId,
+  repositoryInstance,
   saveLease,
   saveRepositoryServer,
   saveSession,
@@ -66,10 +67,13 @@ function leaseFor(
   root: string,
   session: LocalSession,
   paths: MaterializedFile[],
+  generation = randomUUID(),
 ): MaterializationLease {
   return {
     version: 1,
     repositoryId: repositoryId(root),
+    repositoryInstance: repositoryInstance(root),
+    generation,
     root: path.resolve(root),
     server: session.server,
     expiresAt: session.expiresAt,
@@ -426,10 +430,11 @@ test("expiry cleanup does not extend a lease across sessions or delete changed f
   const original = Buffer.from("original\n");
   const paths = ["dirty.env", "replaced.env", "clean.env"];
   for (const entry of paths) await writeFile(path.join(root, entry), original);
-  await saveLease(leaseFor(root, alice, paths.map((entry) => ({
+  const lease = leaseFor(root, alice, paths.map((entry) => ({
     path: entry,
     digest: materializationDigest(original),
-  }))));
+  })));
+  await saveLease(lease);
   await assert.rejects(
     () => saveLease(leaseFor(root, bob, [])),
     /different session/,
@@ -443,7 +448,7 @@ test("expiry cleanup does not extend a lease across sessions or delete changed f
   await mkdir(path.join(root, "replaced.env"));
 
   await assert.rejects(
-    () => lockIfSessionExpired(root, new Date(Date.now() - 1_000).toISOString()),
+    () => lockIfSessionExpired(root, new Date(Date.now() - 1_000).toISOString(), lease.generation),
     /dirty\.env.*replaced\.env/,
   );
   assert.equal(await readFile(path.join(root, "dirty.env"), "utf8"), "unsaved edit\n");
@@ -461,11 +466,12 @@ test("stale watcher leaves a replacement session lease and materialization intac
   const oldSession = localSession("http://127.0.0.1:8787", 101, "old-watcher-token");
   const newSession = localSession(oldSession.server, 101, "new-watcher-token");
   await writeFile(path.join(root, ".env"), original);
-  await saveLease(leaseFor(root, oldSession, [{
+  const oldLease = leaseFor(root, oldSession, [{
     path: ".env",
     digest: materializationDigest(original),
-  }]));
-  const watcher = lockIfSessionExpired(root, new Date(Date.now() + 100).toISOString());
+  }]);
+  await saveLease(oldLease);
+  const watcher = lockIfSessionExpired(root, new Date(Date.now() + 100).toISOString(), oldLease.generation);
   await delay(50);
   await lock(root, false);
   await writeFile(path.join(root, ".env"), original);
@@ -492,9 +498,10 @@ test("expiry watcher follows a checkout renamed before cleanup", async (context)
   await initialize(root, session.server);
   await saveSession(root, session);
   await writeFile(path.join(root, ".env"), plaintext);
-  await saveLease(leaseFor(root, session, [{ path: ".env", digest: materializationDigest(plaintext) }]));
+  const lease = leaseFor(root, session, [{ path: ".env", digest: materializationDigest(plaintext) }]);
+  await saveLease(lease);
   const identity = repositoryId(root);
-  const watcher = lockIfSessionExpired(identity, expiresAt);
+  const watcher = lockIfSessionExpired(identity, expiresAt, lease.generation);
   await delay(50);
   await rename(root, movedRoot);
 
@@ -518,9 +525,10 @@ test("unresolved watcher moves retain the lease and a durable visible error", as
   await initialize(root, session.server);
   await saveSession(root, session);
   await writeFile(path.join(root, ".env"), plaintext);
-  await saveLease(leaseFor(root, session, [{ path: ".env", digest: materializationDigest(plaintext) }]));
+  const lease = leaseFor(root, session, [{ path: ".env", digest: materializationDigest(plaintext) }]);
+  await saveLease(lease);
   const identity = repositoryId(root);
-  const watcher = lockIfSessionExpired(identity, expiresAt);
+  const watcher = lockIfSessionExpired(identity, expiresAt, lease.generation);
   await delay(50);
   await rename(root, movedRoot);
 
@@ -1269,4 +1277,145 @@ test("a copy containing materialized plaintext cannot delete shared state", asyn
   assert.equal((await loadSession(root, server)).token, session.token);
   await lock(root, false);
   assert.equal(await readFile(path.join(copyRoot, ".env"), "utf8"), plaintext.toString("utf8"));
+});
+
+test("a copied checkout cannot claim a moved original lease", async (context) => {
+  const parent = await temporaryDirectory(context, "rolegit-copy-moved-original-");
+  const root = path.join(parent, "original");
+  const copyRoot = path.join(parent, "copy");
+  const movedRoot = path.join(parent, "moved");
+  process.env.ROLEGIT_HOME = path.join(parent, ".test-home");
+  await mkdir(root);
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  const server = "http://127.0.0.1:8787";
+  const session = localSession(server, 101, "copy-moved-original-token");
+  const plaintext = Buffer.from("moved original materialization\n");
+  await initialize(root, server);
+  await saveSession(root, session);
+  await writeFile(path.join(root, ".env"), plaintext);
+  const lease = leaseFor(root, session, [{ path: ".env", digest: materializationDigest(plaintext) }]);
+  await saveLease(lease);
+  await cp(root, copyRoot, { recursive: true });
+  await rename(root, movedRoot);
+
+  const moduleUrl = new URL("../src/commands.js", import.meta.url).href;
+  const child = spawnTestProcess(context, `
+    import { lock } from ${JSON.stringify(moduleUrl)};
+    process.stdout.write("ready\\n");
+    await lock(process.env.CHILD_ROOT, false);
+  `, { CHILD_ROOT: copyRoot, ROLEGIT_HOME: process.env.ROLEGIT_HOME });
+  await child.ready;
+  assert.equal(await child.exit, 1);
+  assert.match(child.stderr(), /duplicate RoleGit checkout identity.*filesystem instance/);
+  assert.equal(await readFile(path.join(movedRoot, ".env"), "utf8"), plaintext.toString("utf8"));
+  assert.equal(await readFile(path.join(copyRoot, ".env"), "utf8"), plaintext.toString("utf8"));
+  assert.equal((await loadLease(movedRoot)).generation, lease.generation);
+
+  await lock(movedRoot, false);
+  await assert.rejects(() => stat(path.join(movedRoot, ".env")), { code: "ENOENT" });
+  assert.equal(await readFile(path.join(copyRoot, ".env"), "utf8"), plaintext.toString("utf8"));
+});
+
+test("an expiry watcher cannot consume a copied checkout after the original moves", async (context) => {
+  const parent = await temporaryDirectory(context, "rolegit-copy-moved-watcher-");
+  const root = path.join(parent, "original");
+  const copyRoot = path.join(parent, "copy");
+  const secondCopyRoot = path.join(parent, "second-copy");
+  const destinationParent = path.join(parent, "nested");
+  const movedRoot = path.join(destinationParent, "moved");
+  process.env.ROLEGIT_HOME = path.join(parent, ".test-home");
+  await Promise.all([mkdir(root), mkdir(destinationParent)]);
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  const expiresAt = new Date(Date.now() + 750).toISOString();
+  const session = localSession("http://127.0.0.1:8787", 101, "copy-moved-watcher-token", expiresAt);
+  const plaintext = Buffer.from("copied watcher materialization\n");
+  await initialize(root, session.server);
+  await saveSession(root, session);
+  await writeFile(path.join(root, ".env"), plaintext);
+  const lease = leaseFor(root, session, [{ path: ".env", digest: materializationDigest(plaintext) }]);
+  await saveLease(lease);
+  const identity = repositoryId(root);
+  const moduleUrl = new URL("../src/commands.js", import.meta.url).href;
+  const child = spawnTestProcess(context, `
+    import { lockIfSessionExpired } from ${JSON.stringify(moduleUrl)};
+    const watcher = lockIfSessionExpired(
+      process.env.CHILD_ID,
+      process.env.CHILD_EXPIRY,
+      process.env.CHILD_GENERATION,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    process.stdout.write("ready\\n");
+    await watcher;
+  `, {
+    CHILD_ID: identity,
+    CHILD_EXPIRY: expiresAt,
+    CHILD_GENERATION: lease.generation,
+    ROLEGIT_HOME: process.env.ROLEGIT_HOME,
+  });
+  await child.ready;
+  await cp(root, copyRoot, { recursive: true });
+  await cp(root, secondCopyRoot, { recursive: true });
+  await rename(root, movedRoot);
+
+  assert.equal(await child.exit, 1);
+  assert.match(child.stderr(), /ambiguous checkout identity.*expiry cleanup remains pending/);
+  assert.equal(await readFile(path.join(movedRoot, ".env"), "utf8"), plaintext.toString("utf8"));
+  assert.equal(await readFile(path.join(copyRoot, ".env"), "utf8"), plaintext.toString("utf8"));
+  assert.equal(await readFile(path.join(secondCopyRoot, ".env"), "utf8"), plaintext.toString("utf8"));
+  assert.equal((await loadLease(movedRoot)).generation, lease.generation);
+  assert.equal((await loadExpiryCleanupError(identity, lease.generation)).generation, lease.generation);
+});
+
+test("a stale watcher cannot erase a newer generation cleanup error", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-overlapping-watchers-");
+  process.env.ROLEGIT_HOME = `${root}-home`;
+  const server = "http://127.0.0.1:8787";
+  const original = Buffer.from("original watcher materialization\n");
+  const oldExpiry = new Date(Date.now() + 3_000).toISOString();
+  const oldSession = localSession(server, 101, "overlapping-old-token", oldExpiry);
+  await writeFile(path.join(root, ".env"), original);
+  const oldLease = leaseFor(root, oldSession, [{ path: ".env", digest: materializationDigest(original) }]);
+  await saveLease(oldLease);
+  const moduleUrl = new URL("../src/commands.js", import.meta.url).href;
+  const watcherScript = `
+    import { lockIfSessionExpired } from ${JSON.stringify(moduleUrl)};
+    const watcher = lockIfSessionExpired(
+      process.env.CHILD_ROOT,
+      process.env.CHILD_EXPIRY,
+      process.env.CHILD_GENERATION,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    process.stdout.write("ready\\n");
+    await watcher;
+  `;
+  const oldWatcher = spawnTestProcess(context, watcherScript, {
+    CHILD_ROOT: root,
+    CHILD_EXPIRY: oldExpiry,
+    CHILD_GENERATION: oldLease.generation,
+    ROLEGIT_HOME: process.env.ROLEGIT_HOME,
+  });
+  await oldWatcher.ready;
+  await lock(root, false);
+
+  const newExpiry = new Date(Date.now() + 750).toISOString();
+  const newSession = localSession(server, 101, "overlapping-new-token", newExpiry);
+  await writeFile(path.join(root, ".env"), original);
+  const newLease = leaseFor(root, newSession, [{ path: ".env", digest: materializationDigest(original) }]);
+  await saveLease(newLease);
+  await writeFile(path.join(root, ".env"), "modified newer materialization\n");
+  const newWatcher = spawnTestProcess(context, watcherScript, {
+    CHILD_ROOT: root,
+    CHILD_EXPIRY: newExpiry,
+    CHILD_GENERATION: newLease.generation,
+    ROLEGIT_HOME: process.env.ROLEGIT_HOME,
+  });
+  await newWatcher.ready;
+
+  assert.equal(await newWatcher.exit, 1);
+  assert.match(newWatcher.stderr(), /modified materialized file/);
+  assert.equal((await loadExpiryCleanupError(repositoryId(root), newLease.generation)).generation, newLease.generation);
+  assert.equal(await oldWatcher.exit, 0);
+  assert.equal((await loadExpiryCleanupError(repositoryId(root), newLease.generation)).generation, newLease.generation);
+  assert.equal((await loadLease(root)).generation, newLease.generation);
+  assert.equal(await readFile(path.join(root, ".env"), "utf8"), "modified newer materialization\n");
 });

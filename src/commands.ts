@@ -1,4 +1,5 @@
 import { readFile, stat } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 import { AuthClient } from "./auth-client.js";
@@ -34,6 +35,7 @@ import {
   loadRepositoryServers,
   loadSessionUnlocked,
   repositoryId,
+  repositoryInstance,
   refreshLeaseMaterializationUnlocked,
   recordExpiryCleanupError,
   replaceLeaseMaterializationsUnlocked,
@@ -148,7 +150,7 @@ async function cleanupLease(
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
     return [error as Error];
   }
-  if (current.sessionId !== lease.sessionId) return [];
+  if (current.generation !== lease.generation) return [];
 
   const failures = await cleanupMaterializedFiles(root, current.paths, log);
   if (!retainOnFailure || failures.length === 0) {
@@ -235,7 +237,10 @@ export function seal(root: string, requested: string[]): Promise<void> {
   return withRepositoryLock(root, () => sealUnlocked(root, requested));
 }
 
-async function unlockUnlocked(root: string, requested: string[]): Promise<LocalSession> {
+async function unlockUnlocked(
+  root: string,
+  requested: string[],
+): Promise<{ session: LocalSession; leaseGeneration: string }> {
   const policy = await loadEnclist(root);
   const staleFailures = await cleanupExpiredLease(root, true);
   let session: LocalSession;
@@ -257,6 +262,8 @@ async function unlockUnlocked(root: string, requested: string[]): Promise<LocalS
   const lease: MaterializationLease = {
     version: 1,
     repositoryId: repositoryId(root),
+    repositoryInstance: repositoryInstance(root),
+    generation: randomUUID(),
     root: path.resolve(root),
     server: policy.authServer,
     expiresAt: session.expiresAt,
@@ -320,10 +327,13 @@ async function unlockUnlocked(root: string, requested: string[]): Promise<LocalS
     }
     throwWithCleanupFailures(error, failures);
   }
-  return session;
+  return { session, leaseGeneration: lease.generation };
 }
 
-export function unlock(root: string, requested: string[]): Promise<LocalSession> {
+export function unlock(
+  root: string,
+  requested: string[],
+): Promise<{ session: LocalSession; leaseGeneration: string }> {
   return withRepositoryLock(root, () => unlockUnlocked(root, requested));
 }
 
@@ -408,7 +418,14 @@ async function withResolvedRepositoryLock<T>(
   }
 }
 
-export async function lockIfSessionExpired(rootOrIdentity: string, expectedExpiry: string): Promise<void> {
+export async function lockIfSessionExpired(
+  rootOrIdentity: string,
+  expectedExpiry: string,
+  expectedGeneration: string,
+): Promise<void> {
+  if (!/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(expectedGeneration)) {
+    throw new Error("invalid expiry watcher generation");
+  }
   const originalRoot = path.isAbsolute(rootOrIdentity) ? rootOrIdentity : undefined;
   const repositoryIdentity = originalRoot ? repositoryId(originalRoot) : rootOrIdentity;
   const withWatcherLock = originalRoot && /^[a-f0-9]{64}$/.test(repositoryIdentity)
@@ -416,6 +433,7 @@ export async function lockIfSessionExpired(rootOrIdentity: string, expectedExpir
     : <T>(operation: (root: string) => Promise<T>) => withResolvedRepositoryLock(repositoryIdentity, operation);
   try {
     const watchedLease = await withWatcherLock(loadLease);
+    if (watchedLease.generation !== expectedGeneration) return;
     let expiry = expectedExpiry;
     while (true) {
       const delay = expiryWatcherDelay(expiry);
@@ -428,7 +446,7 @@ export async function lockIfSessionExpired(rootOrIdentity: string, expectedExpir
           if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
           throw error;
         }
-        if (lease.sessionId !== watchedLease.sessionId) return undefined;
+        if (lease.generation !== watchedLease.generation) return undefined;
         let current: LocalSession;
         try {
           current = await loadSessionUnlocked(root, lease.server);
@@ -447,10 +465,10 @@ export async function lockIfSessionExpired(rootOrIdentity: string, expectedExpir
       if (!nextExpiry) break;
       expiry = nextExpiry;
     }
-    await clearExpiryCleanupError(repositoryIdentity);
+    await clearExpiryCleanupError(repositoryIdentity, expectedGeneration);
   } catch (error) {
     try {
-      await recordExpiryCleanupError(repositoryIdentity, error);
+      await recordExpiryCleanupError(repositoryIdentity, expectedGeneration, error);
     } catch (recordError) {
       throw new AggregateError([error, recordError], "expiry cleanup failed and its error could not be persisted");
     }

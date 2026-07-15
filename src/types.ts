@@ -69,9 +69,16 @@ export interface MaterializedFile {
   digest: string;
 }
 
+export interface RepositoryInstance {
+  device: string;
+  inode: string;
+}
+
 export interface MaterializationLease {
   version: 1;
   repositoryId: string;
+  repositoryInstance: RepositoryInstance;
+  generation: string;
   root: string;
   server: string;
   expiresAt: string;

@@ -57,9 +57,11 @@ async function main(): Promise<void> {
   }
 
   if (command === "__expire") {
-    const [root, expectedExpiry] = args;
-    if (!root || !expectedExpiry || args.length !== 2) throw new Error("invalid expiry watcher arguments");
-    await lockIfSessionExpired(root, expectedExpiry);
+    const [root, expectedExpiry, generation] = args;
+    if (!root || !expectedExpiry || !generation || args.length !== 3) {
+      throw new Error("invalid expiry watcher arguments");
+    }
+    await lockIfSessionExpired(root, expectedExpiry, generation);
     return;
   }
 
@@ -128,13 +130,17 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "unlock") {
-    const session = await unlock(root, args);
+    const { session, leaseGeneration } = await unlock(root, args);
     const identity = repositoryId(root);
     const watcherTarget = /^[a-f0-9]{64}$/.test(identity) ? root : identity;
-    const child = spawn(process.execPath, [process.argv[1]!, "__expire", watcherTarget, session.expiresAt], {
-      detached: true,
-      stdio: "ignore",
-    });
+    const child = spawn(
+      process.execPath,
+      [process.argv[1]!, "__expire", watcherTarget, session.expiresAt, leaseGeneration],
+      {
+        detached: true,
+        stdio: "ignore",
+      },
+    );
     child.unref();
     console.log(`Access expires at ${session.expiresAt}; run \`rolegit lock\` when finished.`);
     return;

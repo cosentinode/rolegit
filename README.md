@@ -143,10 +143,12 @@ modified paths.
 
 RoleGit stores a checkout UUID in Git's private metadata so local cleanup ownership survives moving
 or renaming the checkout without being committed. The UUID is bound to one machine-local checkout
-directory by filesystem identity, so aliases to that directory retain access while a distinct copy
-fails closed before accessing sessions, leases, or plaintext. Expiry watchers use that UUID and the
-machine-local registry rather than a fixed path; a same-parent rename is rediscovered automatically,
-while an unlocatable move retains the lease and a persistent warning for the next command. Remove any
+directory by persisted device/inode identity, so aliases to that directory retain access while a
+distinct copy fails closed before accessing sessions, leases, or plaintext. Leases and their expiry
+watchers also carry a unique generation so an older watcher cannot clean or alter failure state for a
+replacement lease. Expiry watchers use the checkout UUID and machine-local registry rather than a
+fixed path; a same-parent rename is rediscovered automatically, while an ambiguous or unlocatable
+move retains the lease and a generation-scoped persistent warning for the next command. Remove any
 copied materialized plaintext before assigning the copy a fresh identity. `ROLEGIT_HOME`, when set,
 must be absolute and outside the current worktree so commands cannot select repository-stageable
 control state or change namespaces by working directory. Repository mutations, including `init` and

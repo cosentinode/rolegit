@@ -2,12 +2,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat } from "node:fs/promises";
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { gitMetadataPaths } from "./files.js";
 import { normalizePlaintextPath, portablePathKey } from "./paths.js";
-import type { LocalSession, MaterializationLease, MaterializedFile } from "./types.js";
+import type { LocalSession, MaterializationLease, MaterializedFile, RepositoryInstance } from "./types.js";
 
 function roleGitHome(): string {
   const configured = process.env.ROLEGIT_HOME;
@@ -58,16 +58,6 @@ function pathNamesEqual(first: string, second: string): boolean {
     : first === second;
 }
 
-async function rootsEqual(first: string, second: string): Promise<boolean> {
-  const [firstReal, secondReal] = await Promise.all([realpath(first), realpath(second)]);
-  if (pathNamesEqual(firstReal, secondReal)) return true;
-  const [firstStat, secondStat] = await Promise.all([
-    stat(firstReal, { bigint: true }),
-    stat(secondReal, { bigint: true }),
-  ]);
-  return firstStat.ino !== 0n && firstStat.dev === secondStat.dev && firstStat.ino === secondStat.ino;
-}
-
 export function repositoryId(root: string): string {
   let marker: string;
   try {
@@ -108,6 +98,17 @@ export function repositoryId(root: string): string {
   }
 }
 
+export function repositoryInstance(root: string): RepositoryInstance {
+  const rootStat = statSync(realpathSync.native(root), { bigint: true });
+  if (!rootStat.isDirectory()) throw new Error("repository root is not a directory");
+  if (rootStat.ino === 0n) throw new Error("filesystem does not provide a stable repository identity");
+  return { device: rootStat.dev.toString(), inode: rootStat.ino.toString() };
+}
+
+function repositoryInstancesEqual(first: RepositoryInstance, second: RepositoryInstance): boolean {
+  return first.device === second.device && first.inode === second.inode;
+}
+
 function sessionPath(root: string, server: string): string {
   const id = createHash("sha256").update(`${repositoryId(root)}\0${server}`).digest("hex");
   return path.join(roleGitHome(), "sessions", `${id}.json`);
@@ -135,14 +136,21 @@ function expiryErrorPath(repositoryIdentity: string): string {
 
 interface RepositoryMetadata {
   repositoryId: string;
+  repositoryInstance: RepositoryInstance;
   root: string;
   servers: string[];
 }
 
 interface ExpiryCleanupError {
   repositoryId: string;
+  generation: string;
   message: string;
   recordedAt: string;
+}
+
+interface ExpiryCleanupErrors {
+  repositoryId: string;
+  failures: ExpiryCleanupError[];
 }
 
 async function writePrivateJson(destination: string, value: unknown): Promise<void> {
@@ -236,34 +244,28 @@ export function withRepositoryLock<T>(root: string, operation: () => Promise<T>)
   const id = repositoryId(root);
   return withStateLock(`${leasePath(root)}.operation.lock`, async () => {
     const currentRoot = await realpath(root);
+    const currentInstance = repositoryInstance(currentRoot);
     let metadata: RepositoryMetadata;
     try {
       metadata = await loadRepositoryMetadata(root);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      metadata = { repositoryId: id, root: currentRoot, servers: [] };
+      metadata = { repositoryId: id, repositoryInstance: currentInstance, root: currentRoot, servers: [] };
       await writePrivateJson(repositoryPath(root), metadata);
     }
+    if (!repositoryInstancesEqual(metadata.repositoryInstance, currentInstance)) {
+      throw new Error(
+        `duplicate RoleGit checkout identity does not match the registered filesystem instance at ${metadata.root}; ` +
+        "do not use copied checkouts until one has a new identity",
+      );
+    }
     if (!pathNamesEqual(metadata.root, currentRoot)) {
-      let duplicate = false;
-      try {
-        if (!(await rootsEqual(metadata.root, currentRoot))) {
-          duplicate = repositoryId(metadata.root) === id;
-        }
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      }
-      if (duplicate) {
-        throw new Error(
-          `duplicate RoleGit checkout identity at ${metadata.root} and ${currentRoot}; ` +
-          "do not use copied checkouts until one has a new identity",
-        );
-      }
       await writePrivateJson(repositoryPath(root), { ...metadata, root: currentRoot });
     }
     try {
-      const failure = await loadExpiryCleanupError(id);
-      console.error(`warning: previous expiry cleanup failed: ${failure.message}`);
+      for (const failure of (await loadExpiryCleanupErrors(id)).failures) {
+        console.error(`warning: previous expiry cleanup failed: ${failure.message}`);
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
@@ -294,16 +296,21 @@ export function saveSession(root: string, session: LocalSession): Promise<void> 
 }
 
 export async function saveRepositoryServerUnlocked(root: string, server: string): Promise<void> {
-  let servers: string[] = [];
+  let metadata: RepositoryMetadata;
   try {
-    servers = await loadRepositoryServers(root);
+    metadata = await loadRepositoryMetadata(root);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    metadata = {
+      repositoryId: repositoryId(root),
+      repositoryInstance: repositoryInstance(root),
+      root: await realpath(root),
+      servers: [],
+    };
   }
   await writePrivateJson(repositoryPath(root), {
-    repositoryId: repositoryId(root),
-    root: await realpath(root),
-    servers: [...new Set([...servers, server])],
+    ...metadata,
+    servers: [...new Set([...metadata.servers, server])],
   });
 }
 
@@ -319,11 +326,16 @@ async function loadRepositoryMetadataById(repositoryIdentity: string): Promise<R
   }
   const parsed = JSON.parse(await readFile(source, "utf8")) as {
     repositoryId?: unknown;
+    repositoryInstance?: Partial<RepositoryInstance>;
     root?: unknown;
     servers?: unknown;
   };
   if (
     parsed.repositoryId !== repositoryIdentity ||
+    typeof parsed.repositoryInstance?.device !== "string" ||
+    !/^\d+$/.test(parsed.repositoryInstance.device) ||
+    typeof parsed.repositoryInstance.inode !== "string" ||
+    !/^\d+$/.test(parsed.repositoryInstance.inode) ||
     typeof parsed.root !== "string" || !path.isAbsolute(parsed.root) ||
     !Array.isArray(parsed.servers) ||
     !parsed.servers.every((server) => typeof server === "string")
@@ -366,14 +378,12 @@ function existingCheckoutId(root: string): string | undefined {
 
 export async function resolveRepositoryRoot(repositoryIdentity: string): Promise<string> {
   const metadata = await loadRepositoryMetadataById(repositoryIdentity);
-  try {
-    if (/^[a-f0-9]{64}$/.test(repositoryIdentity)) {
-      await stat(metadata.root);
-      return metadata.root;
+  if (/^[a-f0-9]{64}$/.test(repositoryIdentity)) {
+    await stat(metadata.root);
+    if (!repositoryInstancesEqual(metadata.repositoryInstance, repositoryInstance(metadata.root))) {
+      throw new Error(`repository checkout identity is bound to another filesystem instance (${metadata.root})`);
     }
-    if (existingCheckoutId(metadata.root) === repositoryIdentity) return await realpath(metadata.root);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return metadata.root;
   }
   const parent = path.dirname(metadata.root);
   let entries;
@@ -382,38 +392,121 @@ export async function resolveRepositoryRoot(repositoryIdentity: string): Promise
   } catch (error) {
     throw new Error(`cannot locate checkout ${repositoryIdentity}; expiry cleanup remains pending`, { cause: error });
   }
-  for (const entry of entries) {
-    if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-    const candidate = path.join(parent, entry.name);
-    if (existingCheckoutId(candidate) === repositoryIdentity) return realpath(candidate);
+  const matchingInstances: string[] = [];
+  const identityInstances: string[] = [];
+  const candidates = [metadata.root, ...entries
+    .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
+    .map((entry) => path.join(parent, entry.name))];
+  for (const candidate of candidates) {
+    if (existingCheckoutId(candidate) !== repositoryIdentity) continue;
+    let resolved: string;
+    try {
+      resolved = await realpath(candidate);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    if (!identityInstances.some((entry) => pathNamesEqual(entry, resolved))) identityInstances.push(resolved);
+    if (
+      repositoryInstancesEqual(metadata.repositoryInstance, repositoryInstance(resolved)) &&
+      !matchingInstances.some((entry) => pathNamesEqual(entry, resolved))
+    ) matchingInstances.push(resolved);
+  }
+  if (matchingInstances.length === 1) return matchingInstances[0]!;
+  if (matchingInstances.length > 1 || identityInstances.length > 1) {
+    throw new Error(`ambiguous checkout identity ${repositoryIdentity}; expiry cleanup remains pending`);
   }
   throw new Error(`cannot locate checkout ${repositoryIdentity}; expiry cleanup remains pending`);
 }
 
-export async function recordExpiryCleanupError(repositoryIdentity: string, error: unknown): Promise<void> {
-  await writePrivateJson(expiryErrorPath(repositoryIdentity), {
-    repositoryId: repositoryIdentity,
-    message: (error as Error).message,
-    recordedAt: new Date().toISOString(),
-  });
+function invalidExpiryCleanupError(): Error {
+  return new Error("invalid expiry cleanup error");
 }
 
-export async function loadExpiryCleanupError(repositoryIdentity: string): Promise<ExpiryCleanupError> {
+async function loadExpiryCleanupErrors(repositoryIdentity: string): Promise<ExpiryCleanupErrors> {
   const source = expiryErrorPath(repositoryIdentity);
   const sourceStat = await lstat(source);
   if (sourceStat.isSymbolicLink() || !sourceStat.isFile()) throw new Error("refusing non-regular expiry error");
-  const parsed = JSON.parse(await readFile(source, "utf8")) as Partial<ExpiryCleanupError>;
-  if (
-    parsed.repositoryId !== repositoryIdentity ||
-    typeof parsed.message !== "string" ||
-    typeof parsed.recordedAt !== "string" ||
-    !Number.isFinite(new Date(parsed.recordedAt).getTime())
-  ) throw new Error("invalid expiry cleanup error");
-  return parsed as ExpiryCleanupError;
+  const parsed = JSON.parse(await readFile(source, "utf8")) as Partial<ExpiryCleanupErrors>;
+  if (parsed.repositoryId !== repositoryIdentity || !Array.isArray(parsed.failures)) {
+    throw invalidExpiryCleanupError();
+  }
+  for (const failure of parsed.failures) {
+    if (
+      typeof failure !== "object" || failure === null ||
+      failure.repositoryId !== repositoryIdentity ||
+      typeof failure.generation !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(failure.generation) ||
+      typeof failure.message !== "string" ||
+      typeof failure.recordedAt !== "string" ||
+      !Number.isFinite(new Date(failure.recordedAt).getTime())
+    ) throw invalidExpiryCleanupError();
+  }
+  return parsed as ExpiryCleanupErrors;
 }
 
-export async function clearExpiryCleanupError(repositoryIdentity: string): Promise<void> {
-  await rm(expiryErrorPath(repositoryIdentity), { force: true });
+export async function recordExpiryCleanupError(
+  repositoryIdentity: string,
+  generation: string,
+  error: unknown,
+): Promise<void> {
+  if (!/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(generation)) throw new Error("invalid lease generation");
+  const source = expiryErrorPath(repositoryIdentity);
+  await withStateLock(`${source}.lock`, async () => {
+    let failures: ExpiryCleanupError[] = [];
+    try {
+      failures = (await loadExpiryCleanupErrors(repositoryIdentity)).failures;
+    } catch (loadError) {
+      if ((loadError as NodeJS.ErrnoException).code !== "ENOENT") throw loadError;
+    }
+    const failure: ExpiryCleanupError = {
+      repositoryId: repositoryIdentity,
+      generation,
+      message: (error as Error).message,
+      recordedAt: new Date().toISOString(),
+    };
+    const existing = failures.findIndex((entry) => entry.generation === generation);
+    if (existing === -1) failures.push(failure);
+    else failures[existing] = failure;
+    await writePrivateJson(source, { repositoryId: repositoryIdentity, failures });
+  });
+}
+
+export async function loadExpiryCleanupError(
+  repositoryIdentity: string,
+  generation?: string,
+): Promise<ExpiryCleanupError> {
+  const failures = (await loadExpiryCleanupErrors(repositoryIdentity)).failures;
+  const failure = generation === undefined
+    ? failures.at(-1)
+    : failures.find((entry) => entry.generation === generation);
+  if (failure) return failure;
+  const error = new Error("no expiry cleanup error") as NodeJS.ErrnoException;
+  error.code = "ENOENT";
+  throw error;
+}
+
+export async function clearExpiryCleanupError(
+  repositoryIdentity: string,
+  generation?: string,
+): Promise<void> {
+  const source = expiryErrorPath(repositoryIdentity);
+  await withStateLock(`${source}.lock`, async () => {
+    if (generation === undefined) {
+      await rm(source, { force: true });
+      return;
+    }
+    let failures: ExpiryCleanupError[];
+    try {
+      failures = (await loadExpiryCleanupErrors(repositoryIdentity)).failures;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    failures = failures.filter((entry) => entry.generation !== generation);
+    if (failures.length === 0) await rm(source, { force: true });
+    else await writePrivateJson(source, { repositoryId: repositoryIdentity, failures });
+  });
 }
 
 async function assertRepositoryRoot(root: string): Promise<void> {
@@ -426,7 +519,7 @@ async function assertRepositoryRoot(root: string): Promise<void> {
   }
   let matches = false;
   try {
-    matches = await rootsEqual(metadata.root, root);
+    matches = repositoryInstancesEqual(metadata.repositoryInstance, repositoryInstance(root));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
@@ -437,7 +530,7 @@ async function assertRepositoryRoot(root: string): Promise<void> {
 
 export async function loadRepositoryServers(root: string): Promise<string[]> {
   const metadata = await loadRepositoryMetadata(root);
-  if (!(await rootsEqual(metadata.root, root))) {
+  if (!repositoryInstancesEqual(metadata.repositoryInstance, repositoryInstance(root))) {
     throw new Error("repository checkout identity is bound to another root");
   }
   return metadata.servers;
@@ -544,6 +637,9 @@ function normalizeMaterializedFile(value: unknown, root?: string): MaterializedF
 }
 
 export async function saveLeaseUnlocked(lease: MaterializationLease): Promise<void> {
+  if (!repositoryInstancesEqual(lease.repositoryInstance, repositoryInstance(lease.root))) {
+    throw new Error("materialization lease belongs to another repository instance");
+  }
   let existing: MaterializationLease | undefined;
   try {
     existing = await loadLease(lease.root);
@@ -571,7 +667,8 @@ export async function replaceLeaseMaterializationsUnlocked(lease: Materializatio
   if (
     current.server !== lease.server ||
     current.userId !== lease.userId ||
-    current.sessionId !== lease.sessionId
+    current.sessionId !== lease.sessionId ||
+    current.generation !== lease.generation
   ) {
     throw new Error("files are unlocked by a different session; run `rolegit lock` first");
   }
@@ -637,6 +734,13 @@ export async function loadLease(root: string): Promise<MaterializationLease> {
   if (
     lease.version !== 1 ||
     lease.repositoryId !== repositoryId(root) ||
+    typeof lease.repositoryInstance?.device !== "string" ||
+    !/^\d+$/.test(lease.repositoryInstance.device) ||
+    typeof lease.repositoryInstance.inode !== "string" ||
+    !/^\d+$/.test(lease.repositoryInstance.inode) ||
+    !repositoryInstancesEqual(lease.repositoryInstance, repositoryInstance(root)) ||
+    typeof lease.generation !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(lease.generation) ||
     typeof lease.root !== "string" ||
     typeof lease.server !== "string" ||
     typeof lease.expiresAt !== "string" ||

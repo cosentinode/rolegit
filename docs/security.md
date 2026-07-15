@@ -27,7 +27,11 @@ data keys only after checking the current user's server-side access policy.
 The detached expiry watcher is defense in depth, not a guaranteed erasure mechanism. It removes
 unchanged materialized files when the local session expires while the machine is running. The next
 unlock reconciles an expired lease before refusing the expired session: unchanged files are removed,
-while modified or replaced paths are preserved and reported.
+while modified or replaced paths are preserved and reported. Repository metadata and leases bind the
+checkout UUID to its device/inode identity, so a copied UUID cannot consume a moved checkout's lease;
+ambiguous move discovery fails closed. Every lease has a unique generation, and serialized cleanup
+error updates can clear or replace only their own generation, so overlapping stale watchers cannot
+erase a newer failure.
 
 On POSIX systems, RoleGit creates local sessions, leases, and materialized files with owner-only
 mode bits. Node's numeric mode options do not enforce an equivalent private ACL on Windows; Windows
