@@ -23,13 +23,29 @@ function containedRelativePath(root: string, target: string): string | undefined
   return relative === "" ? "." : relative.split(path.sep).join("/");
 }
 
+function realpathWithMissingSuffix(target: string): string {
+  let existing = target;
+  const suffix: string[] = [];
+  while (true) {
+    try {
+      return path.join(realpathSync.native(existing), ...suffix);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const parent = path.dirname(existing);
+      if (parent === existing) throw error;
+      suffix.unshift(path.basename(existing));
+      existing = parent;
+    }
+  }
+}
+
 export function roleGitMetadataPath(root: string): string | undefined {
   const resolvedRoot = path.resolve(root);
   const home = roleGitHome();
   const lexical = containedRelativePath(resolvedRoot, home);
   if (lexical !== undefined) return lexical;
   try {
-    return containedRelativePath(realpathSync.native(resolvedRoot), realpathSync.native(home));
+    return containedRelativePath(realpathSync.native(resolvedRoot), realpathWithMissingSuffix(home));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw error;
@@ -198,6 +214,9 @@ async function withStateLock<T>(destination: string, operation: () => Promise<T>
 }
 
 export function withRepositoryLock<T>(root: string, operation: () => Promise<T>): Promise<T> {
+  if (roleGitMetadataPath(root) !== undefined) {
+    return Promise.reject(new Error("ROLEGIT_HOME must be outside the repository worktree"));
+  }
   const id = repositoryId(root);
   return withStateLock(`${leasePath(root)}.operation.lock`, async () => {
     const currentRoot = await realpath(root);

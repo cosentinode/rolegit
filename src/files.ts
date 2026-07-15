@@ -33,8 +33,16 @@ function gitFailure(operation: string, error: unknown): never {
   throw new Error(`git ${operation} failed${stderr ? `: ${stderr}` : ""}`, { cause: error });
 }
 
-function portablePathspec(relativePath: string): string {
-  return `:(icase,literal)${relativePath}`;
+function listedGitPaths(root: string, args: string[], operation: string): string[] {
+  try {
+    return execFileSync("git", args, {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).split("\0").filter((entry) => entry.length > 0);
+  } catch (error) {
+    gitFailure(operation, error);
+  }
 }
 
 export function gitMetadataPath(root: string): string | undefined {
@@ -87,16 +95,9 @@ export async function existingPortablePathAlias(root: string, relativePath: stri
 }
 
 export function gitPathIsTracked(root: string, relativePath: string): boolean {
-  try {
-    execFileSync("git", ["ls-files", "--error-unmatch", "--", portablePathspec(relativePath)], {
-      cwd: root,
-      stdio: ["ignore", "ignore", "pipe"],
-    });
-    return true;
-  } catch (error) {
-    if (expectedGitNegative(error)) return false;
-    gitFailure("ls-files", error);
-  }
+  const portablePath = portablePathKey(relativePath);
+  return listedGitPaths(root, ["ls-files", "-z"], "ls-files")
+    .some((entry) => portablePathKey(entry) === portablePath);
 }
 
 export function gitPathIsIgnored(root: string, relativePath: string): boolean {
@@ -105,28 +106,26 @@ export function gitPathIsIgnored(root: string, relativePath: string): boolean {
       cwd: root,
       stdio: ["ignore", "ignore", "pipe"],
     });
-    return true;
   } catch (error) {
     if (expectedGitNegative(error)) return false;
     gitFailure("check-ignore", error);
   }
+  const portablePath = portablePathKey(relativePath);
+  const unignored = listedGitPaths(
+    root,
+    ["ls-files", "--others", "--exclude-standard", "-z"],
+    "ls-files --others",
+  );
+  return !unignored.some((entry) => portablePathKey(entry) === portablePath);
 }
 
 export function gitPathExistsInHistory(root: string, relativePath: string): boolean {
-  try {
-    const output = execFileSync(
-      "git",
-      ["log", "--all", "--format=%H", "--", portablePathspec(relativePath)],
-      {
-        cwd: root,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-    return output.trim().length > 0;
-  } catch (error) {
-    gitFailure("log", error);
-  }
+  const portablePath = portablePathKey(relativePath);
+  return listedGitPaths(
+    root,
+    ["-c", "core.quotePath=false", "log", "--all", "--format=", "--name-only", "--no-renames", "-z"],
+    "log",
+  ).some((entry) => portablePathKey(entry) === portablePath);
 }
 
 export async function appendGitIgnore(root: string, relativePath: string): Promise<void> {
@@ -190,18 +189,23 @@ function portableIgnoreAlternatives(relativePath: string): string[] {
     const variants = classes.get(portablePathKey(character)) ?? [character];
     const ascii = variants.filter((variant) => /^[\x00-\x7f]$/.test(variant));
     const unicode = variants.filter((variant) => !/^[\x00-\x7f]$/.test(variant));
-    const choices = [
+    const rawChoices = [
       ...(ascii.length > 1
         ? [`[${ascii.map((variant) => variant.replaceAll(/([\\\]\-^])/g, "\\$1")).join("")}]`]
         : ascii.map(escapeIgnoreLiteral)),
       ...unicode.map(escapeIgnoreLiteral),
     ];
+    const choices = [...new Set(rawChoices.flatMap((choice) => [choice.normalize("NFC"), choice.normalize("NFD")]))];
     if (alternatives.length * choices.length > 1024) {
       throw new Error(`protected path has too many portable Unicode case aliases: ${relativePath}`);
     }
     alternatives = alternatives.flatMap((entry) => choices.map((choice) => `${entry}${choice}`));
   }
-  const normalized = [...new Set(alternatives.flatMap((entry) => [entry.normalize("NFC"), entry.normalize("NFD")]))];
+  const normalized = [...new Set(alternatives.flatMap((entry) => [
+    entry,
+    entry.normalize("NFC"),
+    entry.normalize("NFD"),
+  ]))];
   if (normalized.length > 1024) {
     throw new Error(`protected path has too many portable Unicode case aliases: ${relativePath}`);
   }

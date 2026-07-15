@@ -145,12 +145,11 @@ RoleGit stores a checkout UUID in Git's private metadata so local cleanup owners
 or renaming the checkout without being committed. The UUID is bound to one machine-local checkout
 directory by filesystem identity, so aliases to that directory retain access while a distinct copy
 fails closed before accessing sessions, leases, or plaintext. Remove any copied materialized plaintext
-before assigning the copy a fresh identity. `ROLEGIT_HOME`, when set, must be absolute so commands from
-different working directories cannot select different state. Repository mutations, including `init`
-and `protect`, and session operations use machine-local lock files. If `ROLEGIT_HOME` is inside the
-worktree, its complete namespace is reserved from protection and materialization. A lock left by a
-terminated process is never removed automatically: commands fail with its path so the user can verify
-no RoleGit process is active before removing it.
+before assigning the copy a fresh identity. `ROLEGIT_HOME`, when set, must be absolute and outside the
+current worktree so commands cannot select repository-stageable control state or change namespaces by
+working directory. Repository mutations, including `init` and `protect`, and session operations use
+machine-local lock files. A lock left by a terminated process is never removed automatically: commands
+fail with its path so the user can verify no RoleGit process is active before removing it.
 
 ## Current Scope
 

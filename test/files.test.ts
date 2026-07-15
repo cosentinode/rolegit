@@ -19,8 +19,10 @@ import { saveSession } from "../src/session.js";
 
 async function temporaryDirectory(context: TestContext, prefix: string): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), prefix));
+  const home = await mkdtemp(path.join(tmpdir(), `${prefix}home-`));
   context.after(() => rm(root, { recursive: true, force: true }));
-  process.env.ROLEGIT_HOME = path.join(root, ".test-home");
+  context.after(() => rm(home, { recursive: true, force: true }));
+  process.env.ROLEGIT_HOME = home;
   return root;
 }
 
@@ -112,6 +114,36 @@ test("protect rejects Unicode portable aliases and ignores future equivalents", 
   execFileSync("git", ["check-ignore", "--quiet", "--", "\u03C2.env"], { cwd: root });
   execFileSync("git", ["add", "."], { cwd: root });
   assert.throws(() => execFileSync("git", ["ls-files", "--error-unmatch", "--", "\u03C2.env"], {
+    cwd: root,
+    stdio: "ignore",
+  }));
+});
+
+test("Git history and ignore checks use portable Unicode path identity", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-unicode-git-paths-");
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  execFileSync("git", ["config", "user.email", "test@rolegit.local"], { cwd: root });
+  execFileSync("git", ["config", "user.name", "RoleGit Test"], { cwd: root });
+  await initialize(root, "http://127.0.0.1:8787");
+  const nfdHistorical = "e\u0301.env";
+  const nfcHistorical = "\u00E9.env";
+  await writeFile(path.join(root, nfdHistorical), "SECRET=unicode-history\n");
+  execFileSync("git", ["add", "--", nfdHistorical], { cwd: root });
+  assert.equal(gitPathIsTracked(root, nfcHistorical), true);
+  execFileSync("git", ["commit", "--quiet", "-m", "track decomposed Unicode path"], { cwd: root });
+  execFileSync("git", ["rm", "--quiet", "--", nfdHistorical], { cwd: root });
+  execFileSync("git", ["commit", "--quiet", "-m", "remove decomposed Unicode path"], { cwd: root });
+  assert.equal(gitPathExistsInHistory(root, nfcHistorical), true);
+  await assert.rejects(() => protect(root, nfcHistorical), /exists in Git history/);
+
+  const protectedPath = "\u00E9\u00E9.env";
+  const mixedAlias = "\u00E9e\u0301.env";
+  await protect(root, protectedPath);
+  await writeFile(path.join(root, mixedAlias), "SECRET=mixed-normalization-alias\n");
+  assert.equal(gitPathIsIgnored(root, protectedPath), true);
+  execFileSync("git", ["check-ignore", "--quiet", "--", mixedAlias], { cwd: root });
+  execFileSync("git", ["add", "."], { cwd: root });
+  assert.throws(() => execFileSync("git", ["ls-files", "--error-unmatch", "--", mixedAlias], {
     cwd: root,
     stdio: "ignore",
   }));
