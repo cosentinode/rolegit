@@ -485,6 +485,94 @@ test("stale watcher leaves a replacement session lease and materialization intac
   assert.equal((await loadLease(root)).sessionId, sessionId(newSession));
 });
 
+test("a watcher starting after lock cannot recreate a cleanup error", async (context) => {
+  const parent = await temporaryDirectory(context, "rolegit-late-watcher-");
+  const root = path.join(parent, "repository");
+  process.env.ROLEGIT_HOME = path.join(parent, ".test-home");
+  await mkdir(root);
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  const session = localSession(
+    "http://127.0.0.1:8787",
+    101,
+    "late-watcher-token",
+    new Date(Date.now() + 1_000).toISOString(),
+  );
+  const plaintext = Buffer.from("late watcher materialization\n");
+  await initialize(root, session.server);
+  await writeFile(path.join(root, ".env"), plaintext);
+  const lease = leaseFor(root, session, [{ path: ".env", digest: materializationDigest(plaintext) }]);
+  await saveLease(lease);
+  const identity = repositoryId(root);
+  await lock(root, false);
+  const leaseStatePath = path.join(
+    process.env.ROLEGIT_HOME,
+    "leases",
+    `${createHash("sha256").update(identity).digest("hex")}.json`,
+  );
+  assert.equal(JSON.parse(await readFile(leaseStatePath, "utf8")).status, "completed");
+
+  const moduleUrl = new URL("../src/commands.js", import.meta.url).href;
+  const child = spawnTestProcess(context, `
+    import { lockIfSessionExpired } from ${JSON.stringify(moduleUrl)};
+    process.stdout.write("ready\\n");
+    await lockIfSessionExpired(
+      process.env.CHILD_ID,
+      process.env.CHILD_EXPIRY,
+      process.env.CHILD_GENERATION,
+    );
+  `, {
+    CHILD_ID: identity,
+    CHILD_EXPIRY: session.expiresAt,
+    CHILD_GENERATION: lease.generation,
+    ROLEGIT_HOME: process.env.ROLEGIT_HOME,
+  });
+  await child.ready;
+  assert.equal(await child.exit, 0, child.stderr());
+  await assert.rejects(() => stat(path.join(root, ".env")), { code: "ENOENT" });
+  await assert.rejects(() => loadLease(root), { code: "ENOENT" });
+  await assert.rejects(() => loadExpiryCleanupError(identity, lease.generation), { code: "ENOENT" });
+});
+
+test("a failed repeated unlock preserves the watched lease generation", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-failed-repeated-unlock-");
+  process.env.ROLEGIT_HOME = `${root}-home`;
+  const server = "http://127.0.0.1:8787";
+  await initialize(root, server);
+  const expiresAt = new Date(Date.now() + 2_500).toISOString();
+  const session = localSession(server, 101, "failed-repeated-unlock-token", expiresAt);
+  const plaintext = Buffer.from("existing repeated unlock materialization\n");
+  await saveSession(root, session);
+  await writeFile(path.join(root, ".env"), plaintext);
+  const lease = leaseFor(root, session, [{ path: ".env", digest: materializationDigest(plaintext) }]);
+  await saveLease(lease);
+
+  const moduleUrl = new URL("../src/commands.js", import.meta.url).href;
+  const child = spawnTestProcess(context, `
+    import { lockIfSessionExpired } from ${JSON.stringify(moduleUrl)};
+    const watcher = lockIfSessionExpired(
+      process.env.CHILD_ROOT,
+      process.env.CHILD_EXPIRY,
+      process.env.CHILD_GENERATION,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    process.stdout.write("ready\\n");
+    await watcher;
+  `, {
+    CHILD_ROOT: root,
+    CHILD_EXPIRY: expiresAt,
+    CHILD_GENERATION: lease.generation,
+    ROLEGIT_HOME: process.env.ROLEGIT_HOME,
+  });
+  await child.ready;
+
+  await assert.rejects(() => unlock(root, ["missing.env"]), /not listed in \.enclist/);
+  assert.equal((await loadLease(root)).generation, lease.generation);
+  assert.equal(await child.exit, 0);
+  await assert.rejects(() => stat(path.join(root, ".env")), { code: "ENOENT" });
+  await assert.rejects(() => loadLease(root), { code: "ENOENT" });
+  await assert.rejects(() => loadExpiryCleanupError(repositoryId(root), lease.generation), { code: "ENOENT" });
+});
+
 test("expiry watcher follows a checkout renamed before cleanup", async (context) => {
   const parent = await temporaryDirectory(context, "rolegit-moved-watcher-");
   const root = path.join(parent, "before");

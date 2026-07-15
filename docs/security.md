@@ -31,7 +31,10 @@ while modified or replaced paths are preserved and reported. Repository metadata
 checkout UUID to its device/inode identity, so a copied UUID cannot consume a moved checkout's lease;
 ambiguous move discovery fails closed. Every lease has a unique generation, and serialized cleanup
 error updates can clear or replace only their own generation, so overlapping stale watchers cannot
-erase a newer failure.
+erase a newer failure. Cleanup writes a terminal tombstone for the completed generation; a watcher
+can record an error only while that exact generation is still active, so a process starting after
+successful lock is a no-op. Repeated unlock attempts retain the current watched generation, including
+when partial materialization rolls back and the command reports failure.
 
 On POSIX systems, RoleGit creates local sessions, leases, and materialized files with owner-only
 mode bits. Node's numeric mode options do not enforce an equivalent private ACL on Windows; Windows

@@ -122,8 +122,16 @@ function repositoryStateId(repositoryIdentity: string): string {
   return createHash("sha256").update(repositoryIdentity).digest("hex");
 }
 
+function leasePathForId(repositoryIdentity: string): string {
+  return path.join(roleGitHome(), "leases", `${repositoryStateId(repositoryIdentity)}.json`);
+}
+
 function leasePath(root: string): string {
-  return path.join(roleGitHome(), "leases", `${repositoryStateId(repositoryId(root))}.json`);
+  return leasePathForId(repositoryId(root));
+}
+
+function repositoryOperationLockPath(repositoryIdentity: string): string {
+  return `${leasePathForId(repositoryIdentity)}.operation.lock`;
 }
 
 function repositoryPathForId(repositoryIdentity: string): string {
@@ -155,6 +163,14 @@ interface ExpiryCleanupError {
 interface ExpiryCleanupErrors {
   repositoryId: string;
   failures: ExpiryCleanupError[];
+}
+
+interface CompletedLease {
+  version: 1;
+  status: "completed";
+  repositoryId: string;
+  generation: string;
+  completedAt: string;
 }
 
 async function writePrivateJson(destination: string, value: unknown): Promise<void> {
@@ -246,7 +262,7 @@ export function withRepositoryLock<T>(root: string, operation: () => Promise<T>)
     return Promise.reject(new Error("ROLEGIT_HOME must be outside the repository worktree"));
   }
   const id = repositoryId(root);
-  return withStateLock(`${leasePath(root)}.operation.lock`, async () => {
+  return withStateLock(repositoryOperationLockPath(id), async () => {
     const currentRoot = await realpath(root);
     const currentInstance = repositoryInstance(currentRoot);
     let metadata: RepositoryMetadata;
@@ -453,30 +469,64 @@ async function loadExpiryCleanupErrors(repositoryIdentity: string): Promise<Expi
   return parsed as ExpiryCleanupErrors;
 }
 
+async function leaseGenerationIsActive(repositoryIdentity: string, generation: string): Promise<boolean> {
+  const source = leasePathForId(repositoryIdentity);
+  let parsed: Partial<MaterializationLease & CompletedLease>;
+  try {
+    const sourceStat = await lstat(source);
+    if (sourceStat.isSymbolicLink() || !sourceStat.isFile()) {
+      throw new Error("refusing non-regular materialization lease");
+    }
+    parsed = JSON.parse(await readFile(source, "utf8")) as Partial<MaterializationLease & CompletedLease>;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  if (
+    parsed.version !== 1 ||
+    parsed.repositoryId !== repositoryIdentity ||
+    typeof parsed.generation !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(parsed.generation)
+  ) throw new Error("invalid materialization lease");
+  if (parsed.status === "completed") {
+    if (
+      typeof parsed.completedAt !== "string" ||
+      !Number.isFinite(new Date(parsed.completedAt).getTime())
+    ) throw new Error("invalid materialization lease tombstone");
+    return false;
+  }
+  if (parsed.status !== undefined) throw new Error("invalid materialization lease");
+  return parsed.generation === generation;
+}
+
 export async function recordExpiryCleanupError(
   repositoryIdentity: string,
   generation: string,
   error: unknown,
-): Promise<void> {
+): Promise<boolean> {
   if (!/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(generation)) throw new Error("invalid lease generation");
   const source = expiryErrorPath(repositoryIdentity);
-  await withStateLock(`${source}.lock`, async () => {
-    let failures: ExpiryCleanupError[] = [];
-    try {
-      failures = (await loadExpiryCleanupErrors(repositoryIdentity)).failures;
-    } catch (loadError) {
-      if ((loadError as NodeJS.ErrnoException).code !== "ENOENT") throw loadError;
-    }
-    const failure: ExpiryCleanupError = {
-      repositoryId: repositoryIdentity,
-      generation,
-      message: (error as Error).message,
-      recordedAt: new Date().toISOString(),
-    };
-    const existing = failures.findIndex((entry) => entry.generation === generation);
-    if (existing === -1) failures.push(failure);
-    else failures[existing] = failure;
-    await writePrivateJson(source, { repositoryId: repositoryIdentity, failures });
+  return withStateLock(repositoryOperationLockPath(repositoryIdentity), async () => {
+    if (!(await leaseGenerationIsActive(repositoryIdentity, generation))) return false;
+    await withStateLock(`${source}.lock`, async () => {
+      let failures: ExpiryCleanupError[] = [];
+      try {
+        failures = (await loadExpiryCleanupErrors(repositoryIdentity)).failures;
+      } catch (loadError) {
+        if ((loadError as NodeJS.ErrnoException).code !== "ENOENT") throw loadError;
+      }
+      const failure: ExpiryCleanupError = {
+        repositoryId: repositoryIdentity,
+        generation,
+        message: (error as Error).message,
+        recordedAt: new Date().toISOString(),
+      };
+      const existing = failures.findIndex((entry) => entry.generation === generation);
+      if (existing === -1) failures.push(failure);
+      else failures[existing] = failure;
+      await writePrivateJson(source, { repositoryId: repositoryIdentity, failures });
+    });
+    return true;
   });
 }
 
@@ -738,8 +788,22 @@ export async function loadLease(root: string): Promise<MaterializationLease> {
   }
   const parsed: unknown = JSON.parse(await readFile(source, "utf8"));
   if (typeof parsed !== "object" || parsed === null) throw new Error("invalid materialization lease");
-  const lease = parsed as Partial<MaterializationLease>;
+  const lease = parsed as Partial<MaterializationLease & CompletedLease>;
+  if (lease.status === "completed") {
+    if (
+      lease.version !== 1 ||
+      lease.repositoryId !== repositoryId(root) ||
+      typeof lease.generation !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(lease.generation) ||
+      typeof lease.completedAt !== "string" ||
+      !Number.isFinite(new Date(lease.completedAt).getTime())
+    ) throw new Error("invalid materialization lease tombstone");
+    const error = new Error("no materialization lease") as NodeJS.ErrnoException;
+    error.code = "ENOENT";
+    throw error;
+  }
   if (
+    lease.status !== undefined ||
     lease.version !== 1 ||
     lease.repositoryId !== repositoryId(root) ||
     typeof lease.repositoryInstance?.device !== "string" ||
@@ -765,7 +829,21 @@ export async function loadLease(root: string): Promise<MaterializationLease> {
 }
 
 export async function deleteLeaseUnlocked(root: string): Promise<void> {
-  await rm(leasePath(root), { force: true });
+  let lease: MaterializationLease;
+  try {
+    lease = await loadLease(root);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  const completed: CompletedLease = {
+    version: 1,
+    status: "completed",
+    repositoryId: lease.repositoryId,
+    generation: lease.generation,
+    completedAt: new Date().toISOString(),
+  };
+  await writePrivateJson(leasePath(root), completed);
 }
 
 export function deleteLease(root: string): Promise<void> {

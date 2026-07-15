@@ -253,9 +253,9 @@ async function unlockUnlocked(
     throw cleanupError("expired lease cleanup completed with errors", staleFailures);
   }
   const client = new AuthClient(policy.authServer);
-  let previousPaths: MaterializedFile[] = [];
+  let previousLease: MaterializationLease | undefined;
   try {
-    previousPaths = (await loadLease(root)).paths;
+    previousLease = await loadLease(root);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
@@ -263,7 +263,7 @@ async function unlockUnlocked(
     version: 1,
     repositoryId: repositoryId(root),
     repositoryInstance: repositoryInstance(root),
-    generation: randomUUID(),
+    generation: previousLease?.generation ?? randomUUID(),
     root: path.resolve(root),
     server: policy.authServer,
     expiresAt: session.expiresAt,
@@ -321,7 +321,7 @@ async function unlockUnlocked(
     const retained: MaterializedFile[] = [];
     const failures = await cleanupMaterializedFiles(root, owned, false, retained);
     try {
-      await replaceLeaseMaterializationsUnlocked({ ...lease, paths: [...previousPaths, ...retained] });
+      await replaceLeaseMaterializationsUnlocked({ ...lease, paths: [...(previousLease?.paths ?? []), ...retained] });
     } catch (leaseError) {
       failures.push(leaseError as Error);
     }
@@ -468,7 +468,8 @@ export async function lockIfSessionExpired(
     await clearExpiryCleanupError(repositoryIdentity, expectedGeneration);
   } catch (error) {
     try {
-      await recordExpiryCleanupError(repositoryIdentity, expectedGeneration, error);
+      const recorded = await recordExpiryCleanupError(repositoryIdentity, expectedGeneration, error);
+      if (!recorded) return;
     } catch (recordError) {
       throw new AggregateError([error, recordError], "expiry cleanup failed and its error could not be persisted");
     }
