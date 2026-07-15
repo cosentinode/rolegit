@@ -43,6 +43,9 @@ fsyncs the state directory. Plaintext creation and removal likewise fsync their 
 so cleanup ownership is committed first across abrupt process or power loss. Node does not expose a
 portable Windows directory-flush primitive; Windows keeps file-handle fsync plus strict state-before-
 plaintext ordering, but its power-loss durability for directory entries depends on the filesystem.
+Automatic cleanup also rewrites the durable lease after every successful path removal and before
+attempting the next path. Partial failures therefore retain only paths that were not removed, and a
+later retry cannot use retired digest ownership to delete a newly recreated file.
 
 On POSIX systems, RoleGit creates local sessions, leases, and materialized files with owner-only
 mode bits. Node's numeric mode options do not enforce an equivalent private ACL on Windows; Windows

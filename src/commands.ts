@@ -152,8 +152,20 @@ async function cleanupLease(
   }
   if (current.generation !== lease.generation) return [];
 
-  const failures = await cleanupMaterializedFiles(root, current.paths, log);
-  if (!retainOnFailure || failures.length === 0) {
+  const failures: Error[] = [];
+  let remaining = [...current.paths];
+  for (const file of current.paths) {
+    try {
+      await removeMaterializedFile(root, file);
+      remaining = remaining.filter((entry) => entry.path !== file.path);
+      await replaceLeaseMaterializationsUnlocked({ ...current, root, paths: remaining });
+      if (log) console.log(`Locked ${file.path}`);
+    } catch (error) {
+      failures.push(new Error(`${file.path}: ${(error as Error).message}`, { cause: error }));
+      if (!remaining.some((entry) => entry.path === file.path)) break;
+    }
+  }
+  if (current.paths.length === 0 || (!retainOnFailure && failures.length > 0)) {
     await deleteLeaseUnlocked(root).catch((error: unknown) => failures.push(error as Error));
   }
   return failures;

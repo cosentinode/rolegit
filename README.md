@@ -136,8 +136,10 @@ path that was modified or replaced after the latest successful `unlock` or `seal
 data loss. On POSIX systems, lease reservations fsync both their file and containing state directory
 before plaintext creation, and plaintext creation/removal fsyncs its containing directory. Explicit
 `lock` reports changed paths and relinquishes its cleanup lease; failed automatic
-expiry cleanup retains the lease so a new identity cannot log in until the path is resolved or
-explicitly locked. Local sessions are repository-scoped even when repositories use the same
+expiry cleanup durably retires each successfully removed path before continuing and retains only
+failed paths, so retries cannot act on newly recreated files. A new identity cannot log in until the
+remaining paths are resolved or explicitly locked. Local sessions are repository-scoped even when
+repositories use the same
 authorization server, so `lock` invalidates only the current repository's token. A new login cannot
 replace an active local session or proceed while a live materialization lease remains. Login safely
 cleans unchanged files from an expired lease first and remains blocked if that cleanup reports

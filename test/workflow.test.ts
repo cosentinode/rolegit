@@ -460,9 +460,51 @@ test("expiry cleanup does not extend a lease across sessions or delete changed f
   assert.equal(await readFile(path.join(root, "dirty.env"), "utf8"), "unsaved edit\n");
   assert.ok((await stat(path.join(root, "replaced.env"))).isDirectory());
   await assert.rejects(() => stat(path.join(root, "clean.env")), { code: "ENOENT" });
-  assert.equal((await loadLease(root)).sessionId, sessionId(alice));
+  const retainedLease = await loadLease(root);
+  assert.equal(retainedLease.sessionId, sessionId(alice));
+  assert.deepEqual(retainedLease.paths.map((file) => file.path).sort(), ["dirty.env", "replaced.env"]);
+  await writeFile(path.join(root, "clean.env"), original);
+  await assert.rejects(
+    () => lockIfSessionExpired(root, new Date(Date.now() - 1_000).toISOString(), lease.generation),
+    /dirty\.env.*replaced\.env/,
+  );
+  assert.equal(await readFile(path.join(root, "clean.env"), "utf8"), original.toString("utf8"));
+  assert.deepEqual((await loadLease(root)).paths.map((file) => file.path).sort(), ["dirty.env", "replaced.env"]);
   await assert.rejects(() => login(root, alice.server, 303), /files are unlocked/);
   assert.equal((await loadSession(root, bob.server)).user.id, bob.user.id);
+});
+
+test("partial automatic cleanup retires every successful path around failures", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-partial-expiry-progress-");
+  process.env.ROLEGIT_HOME = `${root}-home`;
+  const session = localSession("http://127.0.0.1:8787", 101, "partial-expiry-progress-token");
+  const original = Buffer.from("partial cleanup materialization\n");
+  const paths = ["first-clean.env", "dirty.env", "second-clean.env"];
+  for (const entry of paths) await writeFile(path.join(root, entry), original);
+  const lease = leaseFor(root, session, paths.map((entry) => ({
+    path: entry,
+    digest: materializationDigest(original),
+  })));
+  await saveLease(lease);
+  await writeFile(path.join(root, "dirty.env"), "modified materialization\n");
+
+  await assert.rejects(
+    () => lockIfSessionExpired(root, new Date(Date.now() - 1_000).toISOString(), lease.generation),
+    /dirty\.env/,
+  );
+  assert.deepEqual((await loadLease(root)).paths.map((file) => file.path), ["dirty.env"]);
+  await Promise.all([
+    writeFile(path.join(root, "first-clean.env"), original),
+    writeFile(path.join(root, "second-clean.env"), original),
+  ]);
+
+  await assert.rejects(
+    () => lockIfSessionExpired(root, new Date(Date.now() - 1_000).toISOString(), lease.generation),
+    /dirty\.env/,
+  );
+  assert.equal(await readFile(path.join(root, "first-clean.env"), "utf8"), original.toString("utf8"));
+  assert.equal(await readFile(path.join(root, "second-clean.env"), "utf8"), original.toString("utf8"));
+  assert.deepEqual((await loadLease(root)).paths.map((file) => file.path), ["dirty.env"]);
 });
 
 test("stale watcher leaves a replacement session lease and materialization intact", async (context) => {
