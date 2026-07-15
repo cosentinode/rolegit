@@ -409,14 +409,18 @@ async function withResolvedRepositoryLock<T>(
 }
 
 export async function lockIfSessionExpired(rootOrIdentity: string, expectedExpiry: string): Promise<void> {
-  const repositoryIdentity = path.isAbsolute(rootOrIdentity) ? repositoryId(rootOrIdentity) : rootOrIdentity;
+  const originalRoot = path.isAbsolute(rootOrIdentity) ? rootOrIdentity : undefined;
+  const repositoryIdentity = originalRoot ? repositoryId(originalRoot) : rootOrIdentity;
+  const withWatcherLock = originalRoot && /^[a-f0-9]{64}$/.test(repositoryIdentity)
+    ? <T>(operation: (root: string) => Promise<T>) => withRepositoryLock(originalRoot, () => operation(originalRoot))
+    : <T>(operation: (root: string) => Promise<T>) => withResolvedRepositoryLock(repositoryIdentity, operation);
   try {
-    const watchedLease = await withResolvedRepositoryLock(repositoryIdentity, loadLease);
+    const watchedLease = await withWatcherLock(loadLease);
     let expiry = expectedExpiry;
     while (true) {
       const delay = expiryWatcherDelay(expiry);
       await new Promise((resolve) => setTimeout(resolve, delay));
-      const nextExpiry = await withResolvedRepositoryLock(repositoryIdentity, async (root) => {
+      const nextExpiry = await withWatcherLock(async (root) => {
         let lease: MaterializationLease;
         try {
           lease = await loadLease(root);

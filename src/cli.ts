@@ -129,7 +129,9 @@ async function main(): Promise<void> {
   }
   if (command === "unlock") {
     const session = await unlock(root, args);
-    const child = spawn(process.execPath, [process.argv[1]!, "__expire", repositoryId(root), session.expiresAt], {
+    const identity = repositoryId(root);
+    const watcherTarget = /^[a-f0-9]{64}$/.test(identity) ? root : identity;
+    const child = spawn(process.execPath, [process.argv[1]!, "__expire", watcherTarget, session.expiresAt], {
       detached: true,
       stdio: "ignore",
     });
