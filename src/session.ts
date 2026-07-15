@@ -367,7 +367,10 @@ function existingCheckoutId(root: string): string | undefined {
 export async function resolveRepositoryRoot(repositoryIdentity: string): Promise<string> {
   const metadata = await loadRepositoryMetadataById(repositoryIdentity);
   try {
-    if (/^[a-f0-9]{64}$/.test(repositoryIdentity)) return await realpath(metadata.root);
+    if (/^[a-f0-9]{64}$/.test(repositoryIdentity)) {
+      await stat(metadata.root);
+      return metadata.root;
+    }
     if (existingCheckoutId(metadata.root) === repositoryIdentity) return await realpath(metadata.root);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
