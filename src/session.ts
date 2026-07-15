@@ -98,11 +98,15 @@ export function repositoryId(root: string): string {
   }
 }
 
-export function repositoryInstance(root: string): RepositoryInstance {
-  const rootStat = statSync(realpathSync.native(root), { bigint: true });
+function repositoryInstanceAtResolvedRoot(root: string): RepositoryInstance {
+  const rootStat = statSync(root, { bigint: true });
   if (!rootStat.isDirectory()) throw new Error("repository root is not a directory");
   if (rootStat.ino === 0n) throw new Error("filesystem does not provide a stable repository identity");
   return { device: rootStat.dev.toString(), inode: rootStat.ino.toString() };
+}
+
+export function repositoryInstance(root: string): RepositoryInstance {
+  return repositoryInstanceAtResolvedRoot(realpathSync.native(root));
 }
 
 function repositoryInstancesEqual(first: RepositoryInstance, second: RepositoryInstance): boolean {
@@ -386,35 +390,39 @@ export async function resolveRepositoryRoot(repositoryIdentity: string): Promise
     return metadata.root;
   }
   const parent = path.dirname(metadata.root);
-  let entries;
-  try {
-    entries = await readdir(parent, { withFileTypes: true });
-  } catch (error) {
-    throw new Error(`cannot locate checkout ${repositoryIdentity}; expiry cleanup remains pending`, { cause: error });
-  }
-  const matchingInstances: string[] = [];
-  const identityInstances: string[] = [];
-  const candidates = [metadata.root, ...entries
-    .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
-    .map((entry) => path.join(parent, entry.name))];
-  for (const candidate of candidates) {
-    if (existingCheckoutId(candidate) !== repositoryIdentity) continue;
-    let resolved: string;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let entries;
     try {
-      resolved = await realpath(candidate);
+      entries = await readdir(parent, { withFileTypes: true });
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-      throw error;
+      throw new Error(`cannot locate checkout ${repositoryIdentity}; expiry cleanup remains pending`, { cause: error });
     }
-    if (!identityInstances.some((entry) => pathNamesEqual(entry, resolved))) identityInstances.push(resolved);
-    if (
-      repositoryInstancesEqual(metadata.repositoryInstance, repositoryInstance(resolved)) &&
-      !matchingInstances.some((entry) => pathNamesEqual(entry, resolved))
-    ) matchingInstances.push(resolved);
-  }
-  if (matchingInstances.length === 1) return matchingInstances[0]!;
-  if (matchingInstances.length > 1 || identityInstances.length > 1) {
-    throw new Error(`ambiguous checkout identity ${repositoryIdentity}; expiry cleanup remains pending`);
+    const matchingInstances: string[] = [];
+    const identityInstances: string[] = [];
+    const candidates = [metadata.root, ...entries
+      .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
+      .map((entry) => path.join(parent, entry.name))];
+    for (const candidate of candidates) {
+      if (existingCheckoutId(candidate) !== repositoryIdentity) continue;
+      let resolved: string;
+      let instance: RepositoryInstance;
+      try {
+        resolved = await realpath(candidate);
+        instance = repositoryInstanceAtResolvedRoot(resolved);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw error;
+      }
+      if (!identityInstances.some((entry) => pathNamesEqual(entry, resolved))) identityInstances.push(resolved);
+      if (
+        repositoryInstancesEqual(metadata.repositoryInstance, instance) &&
+        !matchingInstances.some((entry) => pathNamesEqual(entry, resolved))
+      ) matchingInstances.push(resolved);
+    }
+    if (matchingInstances.length === 1) return matchingInstances[0]!;
+    if (matchingInstances.length > 1 || identityInstances.length > 1) {
+      throw new Error(`ambiguous checkout identity ${repositoryIdentity}; expiry cleanup remains pending`);
+    }
   }
   throw new Error(`cannot locate checkout ${repositoryIdentity}; expiry cleanup remains pending`);
 }

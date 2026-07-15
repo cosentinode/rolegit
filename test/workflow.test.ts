@@ -1335,17 +1335,18 @@ test("an expiry watcher cannot consume a copied checkout after the original move
   const lease = leaseFor(root, session, [{ path: ".env", digest: materializationDigest(plaintext) }]);
   await saveLease(lease);
   const identity = repositoryId(root);
+  await cp(root, copyRoot, { recursive: true });
+  await cp(root, secondCopyRoot, { recursive: true });
+  await rename(root, movedRoot);
   const moduleUrl = new URL("../src/commands.js", import.meta.url).href;
   const child = spawnTestProcess(context, `
     import { lockIfSessionExpired } from ${JSON.stringify(moduleUrl)};
-    const watcher = lockIfSessionExpired(
+    process.stdout.write("ready\\n");
+    await lockIfSessionExpired(
       process.env.CHILD_ID,
       process.env.CHILD_EXPIRY,
       process.env.CHILD_GENERATION,
     );
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    process.stdout.write("ready\\n");
-    await watcher;
   `, {
     CHILD_ID: identity,
     CHILD_EXPIRY: expiresAt,
@@ -1353,9 +1354,6 @@ test("an expiry watcher cannot consume a copied checkout after the original move
     ROLEGIT_HOME: process.env.ROLEGIT_HOME,
   });
   await child.ready;
-  await cp(root, copyRoot, { recursive: true });
-  await cp(root, secondCopyRoot, { recursive: true });
-  await rename(root, movedRoot);
 
   assert.equal(await child.exit, 1);
   assert.match(child.stderr(), /ambiguous checkout identity.*expiry cleanup remains pending/);
