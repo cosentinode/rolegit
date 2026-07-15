@@ -23,16 +23,16 @@ import {
   saveEnclist,
 } from "./policy.js";
 import {
-  deleteLease,
-  deleteSession,
+  deleteLeaseUnlocked,
+  deleteSessionUnlocked,
   loadLease,
   loadRepositoryServers,
-  loadSession,
+  loadSessionUnlocked,
   repositoryId,
   refreshLeaseMaterializationUnlocked,
   saveLeaseUnlocked,
-  saveRepositoryServer,
-  saveSession,
+  saveRepositoryServerUnlocked,
+  saveSessionUnlocked,
   sessionId,
   sessionTimeRemaining,
   withRepositoryLock,
@@ -43,7 +43,7 @@ const MAX_FILE_SIZE = 10 * 1024 * 1024;
 const MAX_ENCRYPTED_FILE_SIZE = 4 * Math.ceil(MAX_FILE_SIZE / 3) + 64 * 1024;
 const MAX_TIMER_DELAY = 2_147_483_647;
 
-export async function initialize(root: string, authServer: string): Promise<void> {
+async function initializeUnlocked(root: string, authServer: string): Promise<void> {
   try {
     await stat(path.join(root, ".enclist"));
     throw new Error("repository already has a .enclist");
@@ -51,11 +51,15 @@ export async function initialize(root: string, authServer: string): Promise<void
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   await saveEnclist(root, createEnclist(authServer));
-  await saveRepositoryServer(root, authServer);
+  await saveRepositoryServerUnlocked(root, authServer);
   console.log("Created .enclist");
 }
 
-export async function protect(root: string, inputPath: string): Promise<void> {
+export function initialize(root: string, authServer: string): Promise<void> {
+  return withRepositoryLock(root, () => initializeUnlocked(root, authServer));
+}
+
+async function protectUnlocked(root: string, inputPath: string): Promise<void> {
   const relativeInput = path.isAbsolute(inputPath) ? path.relative(root, inputPath) : inputPath;
   const protectedPath = normalizeProtectedPath(relativeInput);
   if (protectedPath === ".enclist" || protectedPath.startsWith(".rolegit/")) {
@@ -77,6 +81,10 @@ export async function protect(root: string, inputPath: string): Promise<void> {
   await saveEnclist(root, policy);
   console.log(`Protected ${protectedPath}`);
   console.log(`Register vault ${policy.vaultId} and this path in the authorization service policy.`);
+}
+
+export function protect(root: string, inputPath: string): Promise<void> {
+  return withRepositoryLock(root, () => protectUnlocked(root, inputPath));
 }
 
 function selectFiles(files: Record<string, { object: string }>, requested: string[]): string[] {
@@ -116,7 +124,7 @@ async function cleanupLease(root: string, lease: MaterializationLease, log: bool
   if (current.sessionId !== lease.sessionId) return [];
 
   const failures = await cleanupMaterializedFiles(root, current.paths, log);
-  await deleteLease(root).catch((error: unknown) => failures.push(error as Error));
+  await deleteLeaseUnlocked(root).catch((error: unknown) => failures.push(error as Error));
   return failures;
 }
 
@@ -151,7 +159,7 @@ async function cleanupExpiredLease(root: string): Promise<Error[]> {
 
 async function sealUnlocked(root: string, requested: string[]): Promise<void> {
   const policy = await loadEnclist(root);
-  const session = await loadSession(root, policy.authServer);
+  const session = await loadSessionUnlocked(root, policy.authServer);
   const client = new AuthClient(policy.authServer);
   for (const protectedPath of selectFiles(policy.files, requested)) {
     if (!gitPathIsIgnored(root, protectedPath) || gitPathIsTracked(root, protectedPath)) {
@@ -202,7 +210,7 @@ async function unlockUnlocked(root: string, requested: string[]): Promise<LocalS
   const staleFailures = await cleanupExpiredLease(root);
   let session: LocalSession;
   try {
-    session = await loadSession(root, policy.authServer);
+    session = await loadSessionUnlocked(root, policy.authServer);
   } catch (error) {
     throwWithCleanupFailures(error, staleFailures);
   }
@@ -293,7 +301,7 @@ async function lockUnlocked(root: string, logout: boolean): Promise<void> {
     if (servers.size === 0) {
       try {
         const server = (await loadEnclist(root)).authServer;
-        await saveRepositoryServer(root, server);
+        await saveRepositoryServerUnlocked(root, server);
         servers.add(server);
       } catch (error) {
         failures.push(new Error(
@@ -305,7 +313,7 @@ async function lockUnlocked(root: string, logout: boolean): Promise<void> {
     for (const server of servers) {
       let session: LocalSession | undefined;
       try {
-        session = await loadSession(root, server);
+        session = await loadSessionUnlocked(root, server);
       } catch {
         // Invalid, expired, or missing local sessions still need deletion.
       }
@@ -317,7 +325,7 @@ async function lockUnlocked(root: string, logout: boolean): Promise<void> {
         }
       }
       try {
-        await deleteSession(root, server, session && sessionId(session));
+        await deleteSessionUnlocked(root, server, session && sessionId(session));
       } catch (error) {
         failures.push(error as Error);
       }
@@ -353,7 +361,7 @@ export async function lockIfSessionExpired(root: string, expectedExpiry: string)
       if (lease.sessionId !== watchedLease.sessionId) return undefined;
       let current: LocalSession;
       try {
-        current = await loadSession(root, lease.server);
+        current = await loadSessionUnlocked(root, lease.server);
       } catch {
         const failures = await cleanupLease(root, lease, false);
         if (failures.length > 0) throw cleanupError("expiry cleanup completed with errors", failures);
@@ -388,7 +396,7 @@ async function loginUnlocked(
     for (const previousServer of await loadRepositoryServers(root)) {
       if (previousServer === server) continue;
       try {
-        await loadSession(root, previousServer);
+        await loadSessionUnlocked(root, previousServer);
         throw new Error(`another server session is active (${previousServer}); run \`rolegit lock\` first`);
       } catch (error) {
         if (!/no RoleGit session|RoleGit session expired/.test((error as Error).message)) throw error;
@@ -421,11 +429,11 @@ async function loginUnlocked(
   }
   let saved = false;
   try {
-    await saveSession(root, session);
+    await saveSessionUnlocked(root, session);
     saved = true;
-    await saveRepositoryServer(root, server);
+    await saveRepositoryServerUnlocked(root, server);
   } catch (error) {
-    if (saved) await deleteSession(root, server, sessionId(session)).catch(() => undefined);
+    if (saved) await deleteSessionUnlocked(root, server, sessionId(session)).catch(() => undefined);
     try {
       await client.logout(session);
     } catch (logoutError) {
@@ -449,8 +457,12 @@ export function login(
   return withRepositoryLock(root, () => loginUnlocked(root, server, developmentUser));
 }
 
-export async function printStatus(root: string, server: string): Promise<void> {
-  const session = await loadSession(root, server);
+async function printStatusUnlocked(root: string, server: string): Promise<void> {
+  const session = await loadSessionUnlocked(root, server);
   const minutes = Math.ceil(sessionTimeRemaining(session) / 60_000);
   console.log(`${session.user.login}: ${minutes} minute${minutes === 1 ? "" : "s"} remaining`);
+}
+
+export function printStatus(root: string, server: string): Promise<void> {
+  return withRepositoryLock(root, () => printStatusUnlocked(root, server));
 }

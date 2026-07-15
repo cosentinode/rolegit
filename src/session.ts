@@ -15,6 +15,14 @@ function roleGitHome(): string {
 export function repositoryId(root: string): string {
   let marker: string;
   try {
+    const topLevel = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (path.resolve(topLevel) !== path.resolve(root)) {
+      return createHash("sha256").update(path.resolve(root)).digest("hex");
+    }
     const gitPath = execFileSync("git", ["rev-parse", "--git-path", "rolegit-id"], {
       cwd: root,
       encoding: "utf8",
@@ -57,6 +65,12 @@ function leasePath(root: string): string {
 function repositoryPath(root: string): string {
   const id = createHash("sha256").update(repositoryId(root)).digest("hex");
   return path.join(roleGitHome(), "repositories", `${id}.json`);
+}
+
+interface RepositoryMetadata {
+  repositoryId: string;
+  root: string;
+  servers: string[];
 }
 
 async function writePrivateJson(destination: string, value: unknown): Promise<void> {
@@ -144,17 +158,45 @@ async function withStateLock<T>(destination: string, operation: () => Promise<T>
 }
 
 export function withRepositoryLock<T>(root: string, operation: () => Promise<T>): Promise<T> {
-  return withStateLock(`${leasePath(root)}.operation.lock`, operation);
+  const id = repositoryId(root);
+  return withStateLock(`${leasePath(root)}.operation.lock`, async () => {
+    let metadata: RepositoryMetadata;
+    try {
+      metadata = await loadRepositoryMetadata(root);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      metadata = { repositoryId: id, root: path.resolve(root), servers: [] };
+      await writePrivateJson(repositoryPath(root), metadata);
+    }
+    const currentRoot = path.resolve(root);
+    if (metadata.root !== currentRoot) {
+      let duplicate = false;
+      try {
+        await lstat(metadata.root);
+        duplicate = repositoryId(metadata.root) === id;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      if (duplicate) {
+        throw new Error(
+          `duplicate RoleGit checkout identity at ${metadata.root} and ${currentRoot}; ` +
+          "do not use copied checkouts until one has a new identity",
+        );
+      }
+      await writePrivateJson(repositoryPath(root), { ...metadata, root: currentRoot });
+    }
+    return operation();
+  });
 }
 
 function withSessionLock<T>(root: string, server: string, operation: () => Promise<T>): Promise<T> {
   return withStateLock(`${sessionPath(root, server)}.lock`, operation);
 }
 
-export async function saveSession(root: string, session: LocalSession): Promise<void> {
+export async function saveSessionUnlocked(root: string, session: LocalSession): Promise<void> {
   await withSessionLock(root, session.server, async () => {
     try {
-      const existing = await loadSessionUnlocked(root, session.server);
+      const existing = await loadSessionFile(root, session.server);
       if (sessionId(existing) !== sessionId(session)) {
         throw new Error("another session is active; run `rolegit lock` before logging in again");
       }
@@ -165,7 +207,11 @@ export async function saveSession(root: string, session: LocalSession): Promise<
   });
 }
 
-export async function saveRepositoryServer(root: string, server: string): Promise<void> {
+export function saveSession(root: string, session: LocalSession): Promise<void> {
+  return withRepositoryLock(root, () => saveSessionUnlocked(root, session));
+}
+
+export async function saveRepositoryServerUnlocked(root: string, server: string): Promise<void> {
   let servers: string[] = [];
   try {
     servers = await loadRepositoryServers(root);
@@ -174,11 +220,16 @@ export async function saveRepositoryServer(root: string, server: string): Promis
   }
   await writePrivateJson(repositoryPath(root), {
     repositoryId: repositoryId(root),
+    root: path.resolve(root),
     servers: [...new Set([...servers, server])],
   });
 }
 
-export async function loadRepositoryServers(root: string): Promise<string[]> {
+export function saveRepositoryServer(root: string, server: string): Promise<void> {
+  return withRepositoryLock(root, () => saveRepositoryServerUnlocked(root, server));
+}
+
+async function loadRepositoryMetadata(root: string): Promise<RepositoryMetadata> {
   const source = repositoryPath(root);
   const repositoryStat = await lstat(source);
   if (repositoryStat.isSymbolicLink() || !repositoryStat.isFile()) {
@@ -186,19 +237,40 @@ export async function loadRepositoryServers(root: string): Promise<string[]> {
   }
   const parsed = JSON.parse(await readFile(source, "utf8")) as {
     repositoryId?: unknown;
+    root?: unknown;
     servers?: unknown;
   };
   if (
     parsed.repositoryId !== repositoryId(root) ||
+    typeof parsed.root !== "string" ||
     !Array.isArray(parsed.servers) ||
     !parsed.servers.every((server) => typeof server === "string")
   ) {
     throw new Error("invalid repository session metadata");
   }
-  return parsed.servers;
+  return parsed as RepositoryMetadata;
 }
 
-async function loadSessionUnlocked(root: string, server: string): Promise<LocalSession> {
+async function assertRepositoryRoot(root: string): Promise<void> {
+  let metadata: RepositoryMetadata;
+  try {
+    metadata = await loadRepositoryMetadata(root);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  if (metadata.root !== path.resolve(root)) {
+    throw new Error(`repository checkout identity is bound to another root (${metadata.root})`);
+  }
+}
+
+export async function loadRepositoryServers(root: string): Promise<string[]> {
+  const metadata = await loadRepositoryMetadata(root);
+  if (metadata.root !== path.resolve(root)) throw new Error("repository checkout identity is bound to another root");
+  return metadata.servers;
+}
+
+async function loadSessionFile(root: string, server: string): Promise<LocalSession> {
   let parsed: unknown;
   try {
     const source = sessionPath(root, server);
@@ -233,11 +305,15 @@ async function loadSessionUnlocked(root: string, server: string): Promise<LocalS
   return session as LocalSession;
 }
 
-export function loadSession(root: string, server: string): Promise<LocalSession> {
-  return withSessionLock(root, server, () => loadSessionUnlocked(root, server));
+export function loadSessionUnlocked(root: string, server: string): Promise<LocalSession> {
+  return withSessionLock(root, server, () => loadSessionFile(root, server));
 }
 
-export async function deleteSession(
+export function loadSession(root: string, server: string): Promise<LocalSession> {
+  return withRepositoryLock(root, () => loadSessionUnlocked(root, server));
+}
+
+export async function deleteSessionUnlocked(
   root: string,
   server: string,
   expectedSessionId?: string,
@@ -245,7 +321,7 @@ export async function deleteSession(
   await withSessionLock(root, server, async () => {
     if (expectedSessionId) {
       try {
-        const current = await loadSessionUnlocked(root, server);
+        const current = await loadSessionFile(root, server);
         if (sessionId(current) !== expectedSessionId) return;
       } catch (error) {
         if (/no RoleGit session|RoleGit session expired/.test((error as Error).message)) return;
@@ -254,6 +330,14 @@ export async function deleteSession(
     }
     await rm(sessionPath(root, server), { force: true });
   });
+}
+
+export function deleteSession(
+  root: string,
+  server: string,
+  expectedSessionId?: string,
+): Promise<void> {
+  return withRepositoryLock(root, () => deleteSessionUnlocked(root, server, expectedSessionId));
 }
 
 export function sessionTimeRemaining(session: LocalSession): number {
@@ -335,6 +419,7 @@ export function refreshLeaseMaterialization(
 }
 
 export async function loadLease(root: string): Promise<MaterializationLease> {
+  await assertRepositoryRoot(root);
   const source = leasePath(root);
   const leaseStat = await lstat(source);
   if (leaseStat.isSymbolicLink() || !leaseStat.isFile()) {
@@ -361,6 +446,10 @@ export async function loadLease(root: string): Promise<MaterializationLease> {
   };
 }
 
-export async function deleteLease(root: string): Promise<void> {
+export async function deleteLeaseUnlocked(root: string): Promise<void> {
   await rm(leasePath(root), { force: true });
+}
+
+export function deleteLease(root: string): Promise<void> {
+  return withRepositoryLock(root, () => deleteLeaseUnlocked(root));
 }

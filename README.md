@@ -137,9 +137,12 @@ authorization server, so `lock` invalidates only the current repository's token.
 replace an active local session; run `rolegit lock` first.
 
 RoleGit stores a checkout UUID in Git's private metadata so local cleanup ownership survives moving
-or renaming the checkout without being committed. Repository and session operations use machine-local
-lock files. A lock left by a terminated process is never removed automatically: commands fail with
-its path so the user can verify no RoleGit process is active before removing it.
+or renaming the checkout without being committed. The UUID is bound to one machine-local checkout
+root. If a filesystem copy duplicates it while the original still exists, RoleGit fails closed before
+accessing sessions, leases, or plaintext; remove any copied materialized plaintext before assigning
+the copy a fresh identity. Repository mutations, including `init` and `protect`, and session operations
+use machine-local lock files. A lock left by a terminated process is never removed automatically:
+commands fail with its path so the user can verify no RoleGit process is active before removing it.
 
 ## Current Scope
 

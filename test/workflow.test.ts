@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { once } from "node:events";
 import { createServer } from "node:http";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 
 import { createAuthServer } from "../src/auth-server.js";
 import {
@@ -25,12 +25,14 @@ import { loadEnclist, saveEnclist } from "../src/policy.js";
 import {
   deleteSession,
   loadLease,
+  loadRepositoryServers,
   loadSession,
   repositoryId,
   saveLease,
   saveRepositoryServer,
   saveSession,
   sessionId,
+  withRepositoryLock,
 } from "../src/session.js";
 import type { LocalSession, MaterializationLease, MaterializedFile, ServerPolicy } from "../src/types.js";
 
@@ -50,6 +52,12 @@ function localSession(
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function temporaryDirectory(context: TestContext, prefix: string): Promise<string> {
+  const root = await mkdtemp(path.join(tmpdir(), prefix));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  return root;
 }
 
 function leaseFor(
@@ -74,8 +82,21 @@ function operationLockPath(root: string, home: string): string {
   return path.join(home, "leases", `${id}.json.operation.lock`);
 }
 
+function spawnTestProcess(
+  context: TestContext,
+  script: string,
+  environment: Record<string, string>,
+): { ready: Promise<unknown[]>; exit: Promise<unknown[]>; child: ReturnType<typeof spawn> } {
+  const child = spawn(process.execPath, ["--input-type=module", "--eval", script], {
+    env: { ...process.env, ...environment },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  context.after(() => child.kill("SIGKILL"));
+  return { child, ready: once(child.stdout!, "data"), exit: once(child, "exit") };
+}
+
 test("protect, seal, lock, and unlock workflow", async (context) => {
-  const root = await mkdtemp(path.join(tmpdir(), "rolegit-workflow-"));
+  const root = await temporaryDirectory(context, "rolegit-workflow-");
   process.env.ROLEGIT_HOME = path.join(root, ".test-home");
   execFileSync("git", ["init", "--quiet"], { cwd: root });
 
@@ -107,7 +128,7 @@ test("protect, seal, lock, and unlock workflow", async (context) => {
 
   await login(root, authServer, 101);
   if (process.platform !== "win32") {
-    const outside = await mkdtemp(path.join(tmpdir(), "rolegit-object-symlink-"));
+    const outside = await temporaryDirectory(context, "rolegit-object-symlink-");
     await mkdir(path.join(root, ".rolegit"), { recursive: true });
     await symlink(outside, path.join(root, ".rolegit", "vault"), "dir");
     await assert.rejects(() => seal(root, []), /symbolic-link path/);
@@ -180,8 +201,8 @@ test("protect, seal, lock, and unlock workflow", async (context) => {
   await assert.rejects(() => stat(path.join(root, ".env")), { code: "ENOENT" });
 });
 
-test("lock and failed unlock preserve plaintext without a lease", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "rolegit-no-lease-"));
+test("lock and failed unlock preserve plaintext without a lease", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-no-lease-");
   process.env.ROLEGIT_HOME = path.join(root, ".test-home");
   execFileSync("git", ["init", "--quiet"], { cwd: root });
   await initialize(root, "http://127.0.0.1:8787");
@@ -197,8 +218,8 @@ test("lock and failed unlock preserve plaintext without a lease", async () => {
   assert.equal(await readFile(path.join(root, ".env"), "utf8"), "SECRET=user-owned\n");
 });
 
-test("lock rejects a lease path outside the repository without deleting it", async () => {
-  const parent = await mkdtemp(path.join(tmpdir(), "rolegit-lease-traversal-"));
+test("lock rejects a lease path outside the repository without deleting it", async (context) => {
+  const parent = await temporaryDirectory(context, "rolegit-lease-traversal-");
   const root = path.join(parent, "repository");
   await mkdir(root);
   const home = path.join(parent, "home");
@@ -228,8 +249,8 @@ test("lock rejects a lease path outside the repository without deleting it", asy
   await assert.rejects(() => loadSession(root, session.server), /run `rolegit login` first/);
 });
 
-test("lock preserves changed files but cleans other paths and the session", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "rolegit-dirty-lock-"));
+test("lock preserves changed files but cleans other paths and the session", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-dirty-lock-");
   process.env.ROLEGIT_HOME = path.join(root, ".test-home");
   const session = localSession("http://127.0.0.1:8787", 101, "dirty-lock-token");
   const original = Buffer.from("original\n");
@@ -252,8 +273,8 @@ test("lock preserves changed files but cleans other paths and the session", asyn
   await assert.rejects(() => loadLease(root), { code: "ENOENT" });
 });
 
-test("expiry cleanup does not extend a lease across sessions or delete changed files", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "rolegit-identity-expiry-"));
+test("expiry cleanup does not extend a lease across sessions or delete changed files", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-identity-expiry-");
   process.env.ROLEGIT_HOME = path.join(root, ".test-home");
   const alice = localSession("http://127.0.0.1:8787", 101, "alice-token");
   const bob = localSession(alice.server, 202, "bob-token");
@@ -287,8 +308,8 @@ test("expiry cleanup does not extend a lease across sessions or delete changed f
   assert.equal((await loadSession(root, bob.server)).user.id, bob.user.id);
 });
 
-test("stale watcher leaves a replacement session lease and materialization intact", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "rolegit-stale-watcher-"));
+test("stale watcher leaves a replacement session lease and materialization intact", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-stale-watcher-");
   process.env.ROLEGIT_HOME = path.join(root, ".test-home");
   const original = Buffer.from("same materialization\n");
   const oldSession = localSession("http://127.0.0.1:8787", 101, "old-watcher-token");
@@ -312,8 +333,8 @@ test("stale watcher leaves a replacement session lease and materialization intac
   assert.equal((await loadLease(root)).sessionId, sessionId(newSession));
 });
 
-test("unlock cleans an unchanged lease after offline session expiry", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "rolegit-offline-expiry-"));
+test("unlock cleans an unchanged lease after offline session expiry", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-offline-expiry-");
   process.env.ROLEGIT_HOME = path.join(root, ".test-home");
   const session = localSession(
     "http://127.0.0.1:8787",
@@ -336,8 +357,8 @@ test("unlock cleans an unchanged lease after offline session expiry", async () =
   await assert.rejects(() => loadSession(root, session.server), /run `rolegit login` first/);
 });
 
-test("concurrent same-session lease updates retain every materialized path", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "rolegit-concurrent-lease-"));
+test("concurrent same-session lease updates retain every materialized path", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-concurrent-lease-");
   process.env.ROLEGIT_HOME = path.join(root, ".test-home");
   const session = localSession("http://127.0.0.1:8787", 101, "concurrent-token");
   const first = { path: "first.env", digest: materializationDigest(Buffer.from("first\n")) };
@@ -354,8 +375,8 @@ test("concurrent same-session lease updates retain every materialized path", asy
   ]);
 });
 
-test("concurrent lock and lease extension cannot orphan plaintext", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "rolegit-concurrent-lock-"));
+test("concurrent lock and lease extension cannot orphan plaintext", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-concurrent-lock-");
   process.env.ROLEGIT_HOME = path.join(root, ".test-home");
   const session = localSession("http://127.0.0.1:8787", 101, "concurrent-lock-token");
   const original = Buffer.from("original\n");
@@ -390,8 +411,90 @@ test("concurrent lock and lease extension cannot orphan plaintext", async () => 
   }
 });
 
+test("concurrent initializers serialize across processes", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-concurrent-init-");
+  const home = path.join(root, ".test-home");
+  process.env.ROLEGIT_HOME = home;
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  const moduleUrl = new URL("../src/commands.js", import.meta.url).href;
+  const script = `
+    import { initialize } from ${JSON.stringify(moduleUrl)};
+    process.stdout.write("ready\\n");
+    await initialize(process.env.CHILD_ROOT, process.env.CHILD_SERVER);
+  `;
+  let release!: () => void;
+  let entered!: () => void;
+  const enteredLock = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const releaseLock = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const holder = withRepositoryLock(root, async () => {
+    entered();
+    await releaseLock;
+  });
+  await enteredLock;
+  const children = ["http://127.0.0.1:8787", "http://127.0.0.1:8788"].map((server) =>
+    spawnTestProcess(context, script, {
+      CHILD_ROOT: root,
+      CHILD_SERVER: server,
+      ROLEGIT_HOME: home,
+    }));
+  await Promise.all(children.map(({ ready }) => ready));
+  await delay(100);
+  assert.equal(children.every(({ child }) => child.exitCode === null), true);
+  release();
+  await holder;
+  const exitCodes = await Promise.all(children.map(async ({ exit }) => (await exit)[0]));
+  assert.deepEqual(exitCodes.sort(), [0, 1]);
+  const policy = await loadEnclist(root);
+  assert.deepEqual(await loadRepositoryServers(root), [policy.authServer]);
+});
+
+test("concurrent protect commands retain every policy update", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-concurrent-protect-");
+  const home = path.join(root, ".test-home");
+  process.env.ROLEGIT_HOME = home;
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  await initialize(root, "http://127.0.0.1:8787");
+  const moduleUrl = new URL("../src/commands.js", import.meta.url).href;
+  const script = `
+    import { protect } from ${JSON.stringify(moduleUrl)};
+    process.stdout.write("ready\\n");
+    await protect(process.env.CHILD_ROOT, process.env.CHILD_PATH);
+  `;
+  let release!: () => void;
+  let entered!: () => void;
+  const enteredLock = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const releaseLock = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const holder = withRepositoryLock(root, async () => {
+    entered();
+    await releaseLock;
+  });
+  await enteredLock;
+  const protectedPaths = ["first.env", "second.env", "third.env", "fourth.env"];
+  const children = protectedPaths.map((protectedPath) => spawnTestProcess(context, script, {
+    CHILD_ROOT: root,
+    CHILD_PATH: protectedPath,
+    ROLEGIT_HOME: home,
+  }));
+  await Promise.all(children.map(({ ready }) => ready));
+  await delay(100);
+  assert.equal(children.every(({ child }) => child.exitCode === null), true);
+  release();
+  await holder;
+  const exitCodes = await Promise.all(children.map(async ({ exit }) => (await exit)[0]));
+  assert.deepEqual(exitCodes, [0, 0, 0, 0]);
+  assert.deepEqual(Object.keys((await loadEnclist(root)).files).sort(), protectedPaths.sort());
+});
+
 test("lock uses repository metadata after enclist removal", async (context) => {
-  const root = await mkdtemp(path.join(tmpdir(), "rolegit-repository-session-"));
+  const root = await temporaryDirectory(context, "rolegit-repository-session-");
   process.env.ROLEGIT_HOME = path.join(root, ".test-home");
   const server = createServer((_request, response) => {
     response.writeHead(200, { "content-type": "application/json" });
@@ -411,7 +514,7 @@ test("lock uses repository metadata after enclist removal", async (context) => {
 });
 
 test("lock reports remote logout failure after deleting the local session", async (context) => {
-  const root = await mkdtemp(path.join(tmpdir(), "rolegit-failed-logout-"));
+  const root = await temporaryDirectory(context, "rolegit-failed-logout-");
   process.env.ROLEGIT_HOME = path.join(root, ".test-home");
   const server = createServer((_request, response) => {
     response.writeHead(503, { "content-type": "application/json" });
@@ -437,7 +540,7 @@ test("expiry watcher chunks delays above the Node timer limit", () => {
 });
 
 test("a killed lock owner fails closed for every concurrent waiter", async (context) => {
-  const root = await mkdtemp(path.join(tmpdir(), "rolegit-killed-lock-"));
+  const root = await temporaryDirectory(context, "rolegit-killed-lock-");
   const home = path.join(root, ".test-home");
   process.env.ROLEGIT_HOME = home;
   const moduleUrl = new URL("../src/session.js", import.meta.url).href;
@@ -468,8 +571,8 @@ test("a killed lock owner fails closed for every concurrent waiter", async (cont
   assert.equal((await loadLease(root)).sessionId, sessionId(session));
 });
 
-test("invalid state locks fail closed without waiting for timeout", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "rolegit-invalid-lock-"));
+test("invalid state locks fail closed without waiting for timeout", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-invalid-lock-");
   const home = path.join(root, ".test-home");
   process.env.ROLEGIT_HOME = home;
   const destination = operationLockPath(root, home);
@@ -481,8 +584,8 @@ test("invalid state locks fail closed without waiting for timeout", async () => 
   await assert.rejects(() => saveLease(leaseFor(root, session, [])), /invalid state lock/);
 });
 
-test("an old live lock is never reclaimed by age", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "rolegit-live-lock-"));
+test("an old live lock is never reclaimed by age", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-live-lock-");
   const home = path.join(root, ".test-home");
   process.env.ROLEGIT_HOME = home;
   const destination = operationLockPath(root, home);
@@ -504,7 +607,7 @@ test("an old live lock is never reclaimed by age", async () => {
 });
 
 test("concurrent logins keep one local session and revoke the losing token", async (context) => {
-  const root = await mkdtemp(path.join(tmpdir(), "rolegit-concurrent-login-"));
+  const root = await temporaryDirectory(context, "rolegit-concurrent-login-");
   process.env.ROLEGIT_HOME = path.join(root, ".test-home");
   let issued = 0;
   const revoked: string[] = [];
@@ -541,8 +644,8 @@ test("concurrent logins keep one local session and revoke the losing token", asy
   assert.notEqual(revoked[0], `Bearer ${winner.token}`);
 });
 
-test("expired-session cleanup cannot delete a concurrent replacement", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "rolegit-session-transition-"));
+test("expired-session cleanup cannot delete a concurrent replacement", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-session-transition-");
   process.env.ROLEGIT_HOME = path.join(root, ".test-home");
   const server = "http://127.0.0.1:8787";
   const expired = localSession(server, 101, "expired-race-token", new Date(Date.now() - 1_000).toISOString());
@@ -557,7 +660,7 @@ test("expired-session cleanup cannot delete a concurrent replacement", async () 
 });
 
 test("login updates an association, and later checkout changes cannot redirect lock", async (context) => {
-  const root = await mkdtemp(path.join(tmpdir(), "rolegit-server-change-"));
+  const root = await temporaryDirectory(context, "rolegit-server-change-");
   process.env.ROLEGIT_HOME = path.join(root, ".test-home");
   let firstLogouts = 0;
   let secondLogouts = 0;
@@ -604,7 +707,7 @@ test("login updates an association, and later checkout changes cannot redirect l
 });
 
 test("changing servers requires locking active sessions and leases first", async (context) => {
-  const root = await mkdtemp(path.join(tmpdir(), "rolegit-active-server-change-"));
+  const root = await temporaryDirectory(context, "rolegit-active-server-change-");
   process.env.ROLEGIT_HOME = path.join(root, ".test-home");
   let firstLogouts = 0;
   let secondLogins = 0;
@@ -655,7 +758,7 @@ test("changing servers requires locking active sessions and leases first", async
 });
 
 test("repository-scoped lock leaves another repository session and lease intact", async (context) => {
-  const parent = await mkdtemp(path.join(tmpdir(), "rolegit-repository-sessions-"));
+  const parent = await temporaryDirectory(context, "rolegit-repository-sessions-");
   process.env.ROLEGIT_HOME = path.join(parent, ".test-home");
   const firstRoot = path.join(parent, "first");
   const secondRoot = path.join(parent, "second");
@@ -692,7 +795,7 @@ test("repository-scoped lock leaves another repository session and lease intact"
 });
 
 test("lock invalidates every server session associated with its repository", async (context) => {
-  const root = await mkdtemp(path.join(tmpdir(), "rolegit-associated-servers-"));
+  const root = await temporaryDirectory(context, "rolegit-associated-servers-");
   process.env.ROLEGIT_HOME = path.join(root, ".test-home");
   let firstLogouts = 0;
   let secondLogouts = 0;
@@ -733,7 +836,7 @@ test("lock invalidates every server session associated with its repository", asy
 });
 
 test("moving a checkout preserves cleanup ownership", async (context) => {
-  const parent = await mkdtemp(path.join(tmpdir(), "rolegit-moved-checkout-"));
+  const parent = await temporaryDirectory(context, "rolegit-moved-checkout-");
   const root = path.join(parent, "before");
   const movedRoot = path.join(parent, "after");
   await mkdir(root);
@@ -762,4 +865,58 @@ test("moving a checkout preserves cleanup ownership", async (context) => {
   await assert.rejects(() => stat(path.join(movedRoot, ".env")), { code: "ENOENT" });
   await assert.rejects(() => loadSession(movedRoot, url), /run `rolegit login` first/);
   await assert.rejects(() => loadLease(movedRoot), { code: "ENOENT" });
+});
+
+test("a copy made before materialization cannot consume the original lease", async (context) => {
+  const parent = await temporaryDirectory(context, "rolegit-copy-before-unlock-");
+  const root = path.join(parent, "original");
+  const copyRoot = path.join(parent, "copy");
+  const home = path.join(parent, ".test-home");
+  process.env.ROLEGIT_HOME = home;
+  await mkdir(root);
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  const server = "http://127.0.0.1:8787";
+  const session = localSession(server, 101, "copy-before-token");
+  const plaintext = Buffer.from("original materialization\n");
+  await initialize(root, server);
+  await cp(root, copyRoot, { recursive: true });
+  await saveSession(root, session);
+  await writeFile(path.join(root, ".env"), plaintext);
+  await saveLease(leaseFor(root, session, [{ path: ".env", digest: materializationDigest(plaintext) }]));
+
+  await assert.rejects(() => lock(copyRoot), /duplicate RoleGit checkout identity/);
+  await assert.rejects(() => loadLease(copyRoot), /bound to another root/);
+  await assert.rejects(() => loadSession(copyRoot, server), /duplicate RoleGit checkout identity/);
+  assert.equal(await readFile(path.join(root, ".env"), "utf8"), plaintext.toString("utf8"));
+  assert.equal((await loadLease(root)).sessionId, sessionId(session));
+  assert.equal((await loadSession(root, server)).token, session.token);
+  await lock(root, false);
+});
+
+test("a copy containing materialized plaintext cannot delete shared state", async (context) => {
+  const parent = await temporaryDirectory(context, "rolegit-copy-after-unlock-");
+  const root = path.join(parent, "original");
+  const copyRoot = path.join(parent, "copy");
+  const home = path.join(parent, ".test-home");
+  process.env.ROLEGIT_HOME = home;
+  await mkdir(root);
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  const server = "http://127.0.0.1:8787";
+  const session = localSession(server, 101, "copy-after-token");
+  const plaintext = Buffer.from("copied materialization\n");
+  await initialize(root, server);
+  await saveSession(root, session);
+  await writeFile(path.join(root, ".env"), plaintext);
+  await saveLease(leaseFor(root, session, [{ path: ".env", digest: materializationDigest(plaintext) }]));
+  await cp(root, copyRoot, { recursive: true });
+
+  await assert.rejects(() => lock(copyRoot), /duplicate RoleGit checkout identity/);
+  await assert.rejects(() => loadLease(copyRoot), /bound to another root/);
+  await assert.rejects(() => loadSession(copyRoot, server), /duplicate RoleGit checkout identity/);
+  assert.equal(await readFile(path.join(root, ".env"), "utf8"), plaintext.toString("utf8"));
+  assert.equal(await readFile(path.join(copyRoot, ".env"), "utf8"), plaintext.toString("utf8"));
+  assert.equal((await loadLease(root)).sessionId, sessionId(session));
+  assert.equal((await loadSession(root, server)).token, session.token);
+  await lock(root, false);
+  assert.equal(await readFile(path.join(copyRoot, ".env"), "utf8"), plaintext.toString("utf8"));
 });
