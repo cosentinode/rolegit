@@ -5,6 +5,11 @@ Community or Team architecture and is not offered as a public RoleGit SaaS servi
 boundaries are defined in
 [ADR 0001](adr/0001-product-modes-and-trust-boundaries.md).
 
+In the target Team mode, a customer-controlled policy root authorizes recipient snapshots and the
+RoleGit service receives no plaintext or decryption key material. That service remains trusted for
+signed-metadata freshness until the transparency and consistency protocol defined by ADR 0001 is
+implemented; this is separate from the decrypt-capable prototype boundary documented here.
+
 The prototype separates repository access from secret-decryption access. Git stores only encrypted
 vault objects. The customer-run authorization service holds the key-encryption key and releases
 short-lived data keys only after checking the current user's server-side access policy. Because that

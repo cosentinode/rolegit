@@ -5,10 +5,10 @@
 
 ## Context
 
-RoleGit is moving from a centralized proof of concept to a local-first product. The product needs one
-confidentiality boundary across Community, Team, and Enterprise offerings: encrypted repository
-content must not become decryptable by a RoleGit-operated service. Enterprise customers may instead
-choose to place key authority in infrastructure they control.
+RoleGit is moving from a centralized proof of concept to a local-first product. Across Community,
+Team, and Enterprise offerings, a RoleGit-operated service must not receive plaintext or the private
+key material needed to decrypt repository content. Enterprise customers may instead choose to place
+key authority in infrastructure they control.
 
 This ADR describes the target architecture. The implemented v1 authorization service is classified
 separately under [Centralized Prototype](#centralized-prototype).
@@ -26,20 +26,48 @@ zero-knowledge proofs, and it does not mean the service learns no metadata.
 ## Decision
 
 Community is the default architecture and performs encryption and decryption on authorized user
-devices. Team adds optional metadata-only coordination without changing that confidentiality
-boundary. Enterprise adds customer-controlled KMS and self-hosted choices. A RoleGit-operated Team
-service is never a key authority and cannot decrypt protected files.
+devices. Team adds optional metadata-only coordination without entering the key-custody boundary.
+Enterprise adds customer-controlled KMS and self-hosted choices. A RoleGit-operated Team service is
+never a policy or decryption-key authority and does not receive the material needed to decrypt files;
+it remains part of the authorization-freshness boundary until a global transparency and consistency
+protocol is specified.
 
 | Mode | Key authority | Confidentiality trust boundary | Actors able to decrypt protected files |
 | --- | --- | --- | --- |
-| Community local-first | The signed repository policy plus authorized device and recovery-recipient private keys | Authorized devices; Git hosting and RoleGit services remain outside | Authorized recipient or recovery devices only |
-| Team zero-knowledge coordination | The same signed customer policy and private keys as Community | Authorized devices; RoleGit Team is trusted for coordination availability and metadata sequencing, not content confidentiality | Authorized recipient or recovery devices only; RoleGit Cloud cannot decrypt Team files |
+| Community local-first | A customer-controlled repository policy root authorizes policy-signing keys and recipient snapshots; recipient and recovery private keys unwrap DEKs | Customer policy-signing authority and authorized devices; Git remains outside key custody | Authorized recipient or recovery devices only |
+| Team zero-knowledge coordination | The same customer-controlled policy root and recipient private keys as Community; Team membership results are inputs, not authority | Customer policy-signing authority and authorized devices; Team remains outside key custody but is trusted for availability and freshness of signed metadata until transparency is specified | Authorized recipient or recovery devices only; RoleGit Cloud has no decryption key material |
 | Enterprise customer KMS | The customer's KMS policy and keys | Authorized clients plus the customer KMS security boundary | Authorized clients; the customer KMS is treated as decrypt-capable because it can unwrap DEKs |
-| Enterprise content-blind self-hosted | Customer-authorized devices and recovery recipients | Authorized devices; the customer-hosted coordinator is trusted for metadata but not content confidentiality | Authorized recipient or recovery devices only |
+| Enterprise content-blind self-hosted | The customer-controlled policy root and recipient private keys | Customer policy-signing authority and authorized devices; the customer-hosted coordinator has the same freshness limitation as Team | Authorized recipient or recovery devices only |
 | Enterprise key-broker self-hosted | The customer's self-hosted broker and KMS/KEK | Authorized clients plus the entire customer-operated broker and KMS boundary | Authorized clients and the customer-controlled key boundary; no RoleGit-operated service |
 
-Specific object schemas, algorithms, directory signatures, and KMS APIs belong in versioned protocol
-specifications. They must preserve these boundaries.
+Specific object schemas, algorithms, signature encodings, and KMS APIs belong in versioned protocol
+specifications. They must preserve these boundaries and the following authority rules.
+
+### Policy Authority and Client Verification
+
+The authority is a customer-controlled repository policy-root signing key, not the policy document or
+the coordination service. Its public key and an initial signed checkpoint are provisioned to each new
+device through an authenticated out-of-band enrollment, an existing authorized device, or a
+customer-controlled recovery process. Neither Git nor a coordinator may bootstrap or replace that
+root by itself.
+
+The root may authorize bounded policy-signing keys. Customer-signed policy state binds the repository
+and vault identifiers, monotonic sequence, previous-state digest, expiration, authorized signing
+keys, and recipient-directory digest. Public-key directories and GitHub membership results supplied
+by a coordinator are untrusted inputs until covered by that customer-authorized signature chain.
+
+Before sealing, clients must validate the root chain, repository and vault binding, expiration,
+sequence, predecessor, and recipient-directory digest. They persist the highest accepted checkpoint
+and fail closed on a lower sequence, a different digest at an already observed sequence, or an invalid
+predecessor. The validated recipient snapshot exclusively determines which public keys receive the
+new DEK.
+
+These checks prevent the coordinator from forging recipients and detect rollback or equivocation a
+client has observed, but they do not prove that every client has the globally latest signed state. A
+coordinator can withhold an update or replay a still-valid state to an isolated or newly enrolled
+device, potentially delaying revocation for future seals. Until a versioned transparency and
+freshness protocol closes that gap, Team is outside the decryption-key boundary but remains trusted
+for this authorization-freshness property. The service still cannot decrypt by itself.
 
 ### Community Local-First
 
@@ -49,7 +77,9 @@ customer-controlled custody.
 
 ```mermaid
 flowchart LR
-    A[Authorized device: decrypt-capable] -->|encrypt locally and wrap DEK to recipients| G[Git host: cannot decrypt]
+    R[Customer policy root] -->|signed policy and recipient snapshot| A[Authorized sealing device: decrypt-capable]
+    O[Existing device or customer recovery] -->|authenticated root and checkpoint bootstrap| A
+    A -->|verify state, encrypt locally, and wrap DEK to recipients| G[Git host: cannot decrypt]
     G -->|clone or pull encrypted object| B[Authorized recipient device: decrypt-capable]
     B -->|private key unwrap and local decrypt| P[Plaintext on authorized device]
     C[RoleGit Cloud: cannot decrypt; absent from content and key paths]
@@ -59,20 +89,26 @@ The authorized recipient device can decrypt. The Git host and RoleGit Cloud cann
 
 ### Team Zero-Knowledge Coordination
 
-Team may coordinate public device directories, signed directory mutations, policy digests, rekey
+Team may distribute public device directories, signed directory mutations, policy digests, rekey
 proposals, transparency data, membership results, and privacy-reviewed audit or billing metadata. Its
-APIs must reject plaintext and private or plaintext key material. Clients continue to obtain encrypted
-objects from Git and decrypt locally.
+APIs must reject plaintext and private or plaintext key material. Membership results and directory
+entries cannot authorize a recipient without a customer-authorized signature. Clients continue to
+obtain encrypted objects from Git and decrypt locally.
 
 ```mermaid
 flowchart LR
-    G[Git host: cannot decrypt] -->|encrypted object| D[Authorized device: decrypt-capable]
-    D <-->|public keys, signed mutations, policy digests, proposals| T[RoleGit Team: metadata only; cannot decrypt]
-    D -->|local unwrap and decrypt| P[Plaintext on authorized device]
+    R[Customer policy root] -->|signed policy and recipient snapshot| T[RoleGit Team: metadata only; cannot decrypt]
+    O[Existing device or customer recovery] -->|authenticated root and checkpoint bootstrap| S[Authorized sealing device]
+    T -->|signed state and untrusted membership inputs| S
+    S -->|verify state, encrypt, and wrap new DEK to recipients| G[Git host: cannot decrypt]
+    G -->|encrypted object and wrapped DEK| D[Authorized recipient device: decrypt-capable]
+    D -->|private key unwrap and local decrypt| P[Plaintext on authorized device]
 ```
 
-Only authorized recipient or recovery devices can decrypt. RoleGit Team, other RoleGit Cloud
-components, and the Git host cannot decrypt Team files.
+Only a device holding an authorized recipient or recovery private key can directly decrypt. RoleGit
+Team, other RoleGit Cloud components, and the Git host receive no decryption key material. Team's
+remaining metadata-freshness trust and delayed-revocation risk are defined above rather than hidden by
+an unconditional confidentiality claim.
 
 ### Enterprise Customer KMS
 
@@ -93,25 +129,42 @@ decryption because it controls DEK unwrapping. RoleGit Cloud and the Git host ca
 
 ### Enterprise Self-Hosted
 
-Customers may self-host in either of two explicit profiles:
+Customers may self-host in either of two explicit, mutually exclusive deployment profiles. Neither is
+combined with the separate customer-KMS profile above.
 
-- **Content-blind coordinator:** the service has the Team metadata boundary. Device or recovery
-  private keys remain the key authority, and only authorized devices can decrypt.
-- **Customer key broker:** the customer-operated service and its KMS/KEK authorize and unwrap DEKs.
-  The broker boundary is therefore decrypt-capable and must be secured as customer key infrastructure.
+#### Content-Blind Coordinator
+
+The service has the Team metadata boundary and the same customer-controlled policy-root,
+verification, and freshness rules. Device or recovery private keys remain in client custody, and only
+authorized devices can decrypt.
 
 ```mermaid
 flowchart LR
-    G[Git host: cannot decrypt] --> D[Authorized customer device: decrypt-capable]
-    D <-->|metadata only| C[Customer content-blind coordinator: cannot decrypt]
-    D <-->|wrapped DEK and authorized unwrap| B[Customer key broker and KMS: decrypt-capable]
-    D -->|local decrypt| P[Plaintext on customer device]
-    R[RoleGit Cloud: cannot decrypt; absent from deployment and key path]
+    R[Customer policy root] -->|signed policy and recipient snapshot| C[Customer content-blind coordinator: cannot decrypt]
+    C -->|signed metadata only| S[Authorized customer sealing device]
+    S -->|verify state, encrypt, and wrap DEK to recipients| G[Git host: cannot decrypt]
+    G -->|encrypted object and wrapped DEK| D[Authorized customer recipient device: decrypt-capable]
+    D -->|private key unwrap and local decrypt| P[Plaintext on customer device]
+    L[RoleGit Cloud: cannot decrypt; absent from deployment and key path]
 ```
 
-In the content-blind profile, only authorized devices can decrypt. In the key-broker profile,
-authorized devices and the customer-controlled broker/KMS boundary are decrypt-capable. RoleGit Cloud
-cannot decrypt in either profile.
+#### Customer Key Broker
+
+The customer-operated service and its KMS/KEK authorize and unwrap DEKs. The broker boundary is
+therefore decrypt-capable and must be secured as customer key infrastructure.
+
+```mermaid
+flowchart LR
+    G[Git host: cannot decrypt] -->|encrypted object and wrapped DEK| D[Authorized customer client: decrypt-capable]
+    D <-->|wrapped DEK and authorized unwrap| B[Customer key broker and KMS: decrypt-capable]
+    D -->|local decrypt| P[Plaintext on customer device]
+    R[RoleGit Cloud: absent from deployment and key path]
+```
+
+In the content-blind profile, only authorized devices can decrypt, subject to the documented signed
+metadata freshness boundary. In the key-broker profile, authorized devices and the customer-controlled
+broker/KMS boundary are decrypt-capable. RoleGit Cloud receives no decryption key material in either
+profile.
 
 ## Centralized Prototype
 
@@ -138,10 +191,11 @@ RoleGit-operated Cloud service is part of this prototype deployment.
 ## Consequences
 
 - Community confidentiality does not depend on RoleGit service availability.
-- Team can improve coordination but cannot perform server-side plaintext processing or key recovery.
+- Team can improve coordination but cannot perform server-side plaintext processing or key recovery;
+  it remains trusted for signed-metadata freshness until the transparency protocol is specified.
 - Enterprise customers that select KMS or key-broker modes intentionally expand the decrypt-capable
   boundary to customer-controlled infrastructure.
-- Metadata privacy, retention, replay protection, transparency, and availability require separate
-  specifications even when the service is content-blind.
+- Metadata privacy, retention, global consistency, transparency, and availability require separate
+  specifications even when clients enforce the local rollback and fork checks required here.
 - Product and protocol documentation must identify the key authority and trust boundary whenever a
   new mode or key path is proposed.

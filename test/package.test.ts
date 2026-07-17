@@ -36,7 +36,14 @@ test("package rebuild excludes stale output and includes required files", async 
   const result = JSON.parse(output) as Array<{ files: Array<{ path: string }> }>;
   const files = result[0]!.files.map((file) => file.path);
   assert.ok(files.includes("dist/src/cli.js"));
-  assert.ok(files.includes("docs/security.md"));
+  for (const documentation of [
+    "README.md",
+    "docs/security.md",
+    "docs/adr/0001-product-modes-and-trust-boundaries.md",
+    "docs/adr/0002-branches-protocols-and-repository-ownership.md",
+  ]) {
+    assert.ok(files.includes(documentation), `package is missing ${documentation}`);
+  }
   assert.ok(files.includes("server-policy.example.json"));
   assert.ok(!files.includes("dist/src/deleted-secret.js"));
 });

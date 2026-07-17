@@ -53,8 +53,9 @@ This MIT-licensed repository is the canonical home for:
 
 Public contract changes are proposed and reviewed here before release. A separately operated hosted
 service may have deployment code outside this repository, but it cannot privately redefine these
-contracts or the promise that RoleGit Cloud cannot decrypt Team files. Customer-hosted implementations
-may replace service components while conforming to the same contracts.
+contracts or the promise that RoleGit Cloud receives no plaintext or decryption key material in Team
+mode. Customer-hosted implementations may replace service components while conforming to the same
+contracts.
 
 The MIT license applies to files in this repository. It does not transfer ownership of customer
 repositories, ciphertext, metadata, policies, keys, or plaintext to RoleGit, and it does not imply

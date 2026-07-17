@@ -1,7 +1,9 @@
 # RoleGit
 
-RoleGit adds cryptographic file permissions to Git repositories. GitHub collaborators can clone
-the same repository while only authorized GitHub users and teams can decrypt protected files.
+RoleGit adds cryptographic file permissions to Git repositories. In the target local-first design,
+GitHub collaborators can clone the same repository while protected files are decryptable only on
+devices authorized by a customer-controlled policy. The current prototype instead uses a
+customer-run authorization service that can unwrap data keys and is therefore decrypt-capable.
 
 This is an early TypeScript 7 prototype. It includes encrypted vault objects, GitHub device-flow
 interfaces, server-side authorization, and fixed-duration sessions.
@@ -14,9 +16,10 @@ interfaces, server-side authorization, and fixed-duration sessions.
 
 The target Community, Team, and Enterprise boundaries are defined in
 [ADR 0001](docs/adr/0001-product-modes-and-trust-boundaries.md). Community is local-first by default;
-Team coordinates metadata without receiving decryptable key material; Enterprise key authority stays
-in customer-controlled devices, KMS, or self-hosted infrastructure. Branch, protocol, and MIT
-repository governance are defined in
+Team distributes customer-signed metadata without receiving decryptable key material, although
+metadata freshness remains in its trust boundary until the transparency protocol is specified;
+Enterprise key authority stays in customer-controlled devices, KMS, or self-hosted infrastructure.
+Branch, protocol, and MIT repository governance are defined in
 [ADR 0002](docs/adr/0002-branches-protocols-and-repository-ownership.md).
 
 ## Requirements
