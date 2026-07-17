@@ -226,15 +226,43 @@ KEK, unwraps DEKs after its policy check, and returns DEKs to clients. The servi
 the confidentiality boundary and must be considered capable of decrypting if it obtains ciphertext.
 It binds to loopback by default and lacks production deployment controls.
 
+The service's identity is not pinned independently of Git. The client reads `authServer` from tracked
+`.enclist`, accepts any HTTPS origin (or loopback HTTP), and uses that endpoint for login, DEK
+generation, and unwrap. A repository writer or Git host presenting a split view can therefore redirect
+a fresh checkout or a subsequent login after the old local session is inactive. GitHub authentication
+establishes the user's identity to the selected service; it does not authenticate that service as the
+customer's intended deployment. The selected endpoint can return valid-shaped login and key responses
+without proving possession of a customer-pinned service identity.
+
+The legitimate server policy is therefore not the sole authority for future seals. Tracked endpoint
+distribution and the user's manual verification select which server policy and key boundary the client
+trusts. A replacement service can choose a DEK and wrapped key for `seal`, then decrypt or forge that
+version if it obtains the ciphertext from Git. Redirected `unlock` requests disclose the vault, path,
+and wrapped key and can deny availability, but endpoint replacement alone does not reveal objects
+previously sealed through the expected service: the replacement cannot unwrap their DEKs, and an
+incorrect key fails authenticated decryption. An active machine-local server/session association or
+materialization lease blocks transparent replacement, and `lock` remembers previously used servers;
+these properties protect continuity and cleanup, not fresh-checkout or later-login bootstrap.
+
+Until this path is removed or service identity is pinned, administrators must distribute the expected
+canonical endpoint through an authenticated channel outside Git, and users must verify the exact
+`.enclist.authServer` value before every prototype login. An endpoint change requires explicit
+administrator/user verification. Implementation is tracked in
+[issue #55](https://github.com/cosentinode/rolegit/issues/55).
+
 This prototype is not the Community default, not the Team architecture, and not a public RoleGit SaaS
 offering. It exists to validate workflow and security assumptions until the local-first format and
 recipient model replace or isolate it. It must not be deployed with real secrets.
 
 ```mermaid
 flowchart LR
-    D[Prototype client: plaintext-DEK holder and decrypt-capable] -->|seal: authorized fresh data-key request| S[Customer-run experimental service: generates and unwraps plaintext DEKs; decrypt-capable]
+    W[Repository writer or Git split view] -->|can replace tracked authServer| G[Git and config distribution: ciphertext store; no key by itself]
+    G -->|checkout: tracked authServer selects an unpinned endpoint| D[Prototype client: plaintext-DEK holder and decrypt-capable]
+    A[Customer administrator or user] -.->|must verify expected endpoint out of band| D
+    D -->|login: trust selected service responses| S[Selected experimental service: generates and unwraps plaintext DEKs; decrypt-capable]
+    D -->|seal: authorized fresh data-key request| S
     S -->|seal: return plaintext DEK and wrapped DEK| D
-    D -->|seal: encrypt locally; store ciphertext and wrapped DEK| G[Git host: cannot decrypt]
+    D -->|seal: encrypt locally; store ciphertext and wrapped DEK| G
     G -->|unlock: encrypted object and wrapped DEK| D
     D -->|unlock: request unwrap with wrapped DEK and authorization context| S
     S -->|unlock: return plaintext DEK after policy check| D
@@ -246,7 +274,9 @@ Both the authorized client and the self-hosted prototype service boundary are de
 RoleGit-operated Cloud service is part of this prototype deployment. The client stores the generated
 DEK wrapped with each encrypted object, and an authorized unwrap recovers the same DEK. Prototype
 session expiry prevents a later unwrap request but does not expire a DEK or plaintext already released,
-nor does it remove older wrapped DEKs from Git history.
+nor does it remove older wrapped DEKs from Git history. Git remains outside direct key custody only as
+a passive store; a repository writer or split-view Git host can redirect configuration to a colluding
+service and thereby compromise confidentiality and authenticity of future seals.
 
 ## Consequences
 
@@ -260,6 +290,9 @@ nor does it remove older wrapped DEKs from Git history.
   it remains trusted for signed-metadata freshness until the transparency protocol is specified.
 - Enterprise customers that select KMS or key-broker modes intentionally expand the decrypt-capable
   boundary to customer-controlled infrastructure.
+- The centralized prototype's tracked service endpoint is inside its bootstrap and confidentiality
+  boundary: repository writers can redirect future login and key operations unless users verify the
+  endpoint out of band, and HTTPS plus active-session continuity does not pin customer service identity.
 - Metadata privacy, retention, global consistency, transparency, and availability require separate
   specifications even when clients enforce the local rollback and fork checks required here.
 - Product and protocol documentation must identify the key authority and trust boundary whenever a

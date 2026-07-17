@@ -62,11 +62,31 @@ rolegit protect .env
 }
 ```
 
+The prototype also reads `authServer` from this tracked file. A repository writer or Git split view
+can replace it, and the CLI checks only that a non-loopback endpoint uses HTTPS; it does not pin the
+endpoint to the intended customer service identity. On a fresh checkout, or a later login after the
+previous session is no longer active, the selected endpoint controls the authentication exchange and
+the key-generation and unwrap requests used by later `seal` and `unlock` operations. GitHub login
+authenticates the user to that selected service, not the service to the user.
+
+An active session or materialization lease prevents a transparent server replacement, and `lock`
+remembers the machine-local server association rather than trusting a later checkout change. Those
+controls do not protect initial or subsequent bootstrap. Before every prototype login, an
+administrator must distribute the expected canonical endpoint through a channel outside Git, and the
+user must verify the exact `.enclist.authServer` value and stop if it changed unexpectedly. Standard
+HTTPS validation alone does not establish that this is the customer's intended service. Durable
+service-identity pinning or removal of this key path is tracked in
+[issue #55](https://github.com/cosentinode/rolegit/issues/55).
+
 `rolegit protect` refuses already tracked files and adds the plaintext path to `.gitignore`.
 For this experimental self-hosted prototype, copy the generated vault ID and protected paths into an
 authorization-service policy based on [`server-policy.example.json`](server-policy.example.json).
-That prototype server-side policy is the access authority; changing `.enclist` cannot grant decryption
-permission.
+The policy of the service actually contacted authorizes its requests. Changing only tracked vault or
+path data cannot alter the expected service's policy, but replacing `authServer` can bypass that
+service for future seals: a replacement service can return a DEK and wrapped key it controls and later
+decrypt or forge that resulting encrypted version if it obtains the committed object. Redirection does
+not by itself reveal an older object sealed through the expected service because the replacement
+service cannot unwrap its DEK, although it can deny access by receiving the unwrap request instead.
 
 ## Local End-to-End Development
 

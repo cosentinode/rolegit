@@ -18,13 +18,18 @@ test("public docs preserve architecture, release, and parsing boundaries", async
   assert.match(readme, /Git\/customer synchronization path remains trusted for signed-state freshness/);
   assert.match(readme, /does not revoke older\s+ciphertext and wrapped keys retained in Git history/);
   assert.match(readme, /encrypted-object, `\.enclist`, and server-policy readers/);
+  assert.match(readme, /repository writer or Git split view\s+can replace it/);
+  assert.match(readme, /does not pin the\s+endpoint to the intended customer service identity/);
   assert.match(readme, /`develop` is the integration branch and the base for feature and maintenance pull requests/);
   assert.match(readme, /`main`\s+contains stable release history and is the base for reviewed release-promotion pull requests/);
   assert.match(security, /stale or split view can delay revocation for future seals/);
   assert.match(security, /persisted wrapped DEKs and DEKs already\s+released to clients do not acquire that session expiry/);
+  assert.match(security, /legitimate service policy controls only requests that\s+reach it and is not the sole authority for future seals/);
   assert.match(architecture, /inside Community's authorization-freshness\s+boundary/);
   assert.match(architecture, /removed recipient who retains that private key can later\s+check out and decrypt an older commit/);
   assert.match(architecture, /Credentials, sessions, or tokens expire independently/);
+  assert.match(architecture, /legitimate server policy is therefore not the sole authority for future seals/);
+  assert.match(architecture, /endpoint replacement alone does not reveal objects\s+previously sealed through the expected service/);
   const diagrams = architecture.match(/```mermaid\r?\n[\s\S]*?\r?\n```/g) ?? [];
   assert.equal(diagrams.length, 6);
   for (const diagram of diagrams) {
