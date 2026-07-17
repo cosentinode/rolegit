@@ -1,0 +1,935 @@
+import { createHash, randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { homedir } from "node:os";
+import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat } from "node:fs/promises";
+import { lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import path from "node:path";
+
+import { ensureDurableDirectory, gitMetadataPaths, syncDirectory } from "./files.js";
+import { normalizePlaintextPath, portablePathKey } from "./paths.js";
+import type { LocalSession, MaterializationLease, MaterializedFile, RepositoryInstance } from "./types.js";
+
+function roleGitHome(): string {
+  const configured = process.env.ROLEGIT_HOME;
+  if (configured !== undefined && !path.isAbsolute(configured)) {
+    throw new Error("ROLEGIT_HOME must be an absolute path");
+  }
+  return path.resolve(configured ?? path.join(homedir(), ".config", "rolegit"));
+}
+
+function containedRelativePath(root: string, target: string): string | undefined {
+  const relative = path.relative(root, target);
+  if (path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`)) return undefined;
+  return relative === "" ? "." : relative.split(path.sep).join("/");
+}
+
+function realpathWithMissingSuffix(target: string): string {
+  let existing = target;
+  const suffix: string[] = [];
+  while (true) {
+    try {
+      return path.join(realpathSync.native(existing), ...suffix);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const parent = path.dirname(existing);
+      if (parent === existing) throw error;
+      suffix.unshift(path.basename(existing));
+      existing = parent;
+    }
+  }
+}
+
+export function roleGitMetadataPath(root: string): string | undefined {
+  const resolvedRoot = path.resolve(root);
+  const home = roleGitHome();
+  const lexical = containedRelativePath(resolvedRoot, home);
+  if (lexical !== undefined) return lexical;
+  try {
+    return containedRelativePath(realpathSync.native(resolvedRoot), realpathWithMissingSuffix(home));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function pathNamesEqual(first: string, second: string): boolean {
+  return process.platform === "win32"
+    ? portablePathKey(first) === portablePathKey(second)
+    : first === second;
+}
+
+function registeredRepositoryIds(root: string): string[] {
+  const instance = repositoryInstance(root);
+  const directory = path.join(roleGitHome(), "repositories");
+  let entries;
+  try {
+    entries = readdirSync(directory, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const identities = new Set<string>();
+  for (const entry of entries) {
+    if (!entry.name.endsWith(".json")) continue;
+    const source = path.join(directory, entry.name);
+    const sourceStat = lstatSync(source);
+    if (sourceStat.isSymbolicLink() || !sourceStat.isFile()) {
+      throw new Error("refusing non-regular repository session metadata");
+    }
+    const parsed = JSON.parse(readFileSync(source, "utf8")) as Partial<RepositoryMetadata>;
+    if (
+      typeof parsed.repositoryId !== "string" ||
+      !(/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(parsed.repositoryId) || /^[a-f0-9]{64}$/.test(parsed.repositoryId)) ||
+      typeof parsed.repositoryInstance?.device !== "string" ||
+      !/^\d+$/.test(parsed.repositoryInstance.device) ||
+      typeof parsed.repositoryInstance.inode !== "string" ||
+      !/^\d+$/.test(parsed.repositoryInstance.inode) ||
+      typeof parsed.root !== "string" || !path.isAbsolute(parsed.root) ||
+      !Array.isArray(parsed.servers) ||
+      !parsed.servers.every((server) => typeof server === "string")
+    ) throw new Error("invalid repository session metadata");
+    if (repositoryInstancesEqual(parsed.repositoryInstance as RepositoryInstance, instance)) {
+      identities.add(parsed.repositoryId);
+    }
+  }
+  return [...identities];
+}
+
+function readCheckoutMarker(marker: string): string | undefined {
+  try {
+    const markerStat = lstatSync(marker);
+    if (markerStat.isSymbolicLink() || !markerStat.isFile()) {
+      throw new Error("refusing non-regular RoleGit checkout identity");
+    }
+    const value = readFileSync(marker, "utf8").trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(value)) throw new Error("invalid RoleGit checkout identity");
+    return value;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function writeCheckoutMarker(marker: string, identity: string): void {
+  mkdirSync(path.dirname(marker), { recursive: true, mode: 0o700 });
+  const existing = readCheckoutMarker(marker);
+  if (existing !== undefined) return;
+  try {
+    writeFileSync(marker, `${identity}\n`, { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+}
+
+export function repositoryId(root: string): string {
+  let marker: string;
+  try {
+    const prefix = execFileSync("git", ["rev-parse", "--show-prefix"], {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (prefix !== "") {
+      return createHash("sha256").update(path.resolve(root)).digest("hex");
+    }
+    const gitPath = execFileSync("git", ["rev-parse", "--git-path", "rolegit-id"], {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    marker = path.resolve(root, gitPath);
+  } catch {
+    return createHash("sha256").update(path.resolve(root)).digest("hex");
+  }
+  const markerIdentity = readCheckoutMarker(marker);
+  const registered = registeredRepositoryIds(root);
+  if (registered.length > 1) {
+    throw new Error(
+      `multiple RoleGit checkout identities are registered for ${path.resolve(root)}; ` +
+      `inspect ${path.join(roleGitHome(), "repositories")} and restore one binding before running \`rolegit lock\``,
+    );
+  }
+  const registeredIdentity = registered[0];
+  if (registeredIdentity !== undefined) {
+    if (markerIdentity !== undefined && markerIdentity !== registeredIdentity) {
+      throw new Error(
+        `active Git checkout identity ${markerIdentity} conflicts with registered identity ${registeredIdentity}; ` +
+        "restore the intended Git context and run `rolegit lock` before changing checkout identity",
+      );
+    }
+    if (!/^[a-f0-9]{64}$/.test(registeredIdentity) && markerIdentity === undefined) {
+      writeCheckoutMarker(marker, registeredIdentity);
+    }
+    return registeredIdentity;
+  }
+  if (markerIdentity !== undefined) return markerIdentity;
+  const value = randomUUID();
+  writeCheckoutMarker(marker, value);
+  return readCheckoutMarker(marker)!;
+}
+
+function repositoryInstanceAtResolvedRoot(root: string): RepositoryInstance {
+  const rootStat = statSync(root, { bigint: true });
+  if (!rootStat.isDirectory()) throw new Error("repository root is not a directory");
+  if (rootStat.ino === 0n) throw new Error("filesystem does not provide a stable repository identity");
+  return { device: rootStat.dev.toString(), inode: rootStat.ino.toString() };
+}
+
+export function repositoryInstance(root: string): RepositoryInstance {
+  return repositoryInstanceAtResolvedRoot(realpathSync.native(root));
+}
+
+function repositoryInstancesEqual(first: RepositoryInstance, second: RepositoryInstance): boolean {
+  return first.device === second.device && first.inode === second.inode;
+}
+
+function sessionPath(root: string, server: string): string {
+  const id = createHash("sha256").update(`${repositoryId(root)}\0${server}`).digest("hex");
+  return path.join(roleGitHome(), "sessions", `${id}.json`);
+}
+
+function repositoryStateId(repositoryIdentity: string): string {
+  return createHash("sha256").update(repositoryIdentity).digest("hex");
+}
+
+function leasePathForId(repositoryIdentity: string): string {
+  return path.join(roleGitHome(), "leases", `${repositoryStateId(repositoryIdentity)}.json`);
+}
+
+function leasePath(root: string): string {
+  return leasePathForId(repositoryId(root));
+}
+
+function repositoryOperationLockPath(repositoryIdentity: string): string {
+  return `${leasePathForId(repositoryIdentity)}.operation.lock`;
+}
+
+function repositoryInstanceLockPath(instance: RepositoryInstance): string {
+  const id = createHash("sha256").update(`${instance.device}\0${instance.inode}`).digest("hex");
+  return path.join(roleGitHome(), "repositories", "instances", `${id}.lock`);
+}
+
+function repositoryPathForId(repositoryIdentity: string): string {
+  return path.join(roleGitHome(), "repositories", `${repositoryStateId(repositoryIdentity)}.json`);
+}
+
+function repositoryPath(root: string): string {
+  return repositoryPathForId(repositoryId(root));
+}
+
+function expiryErrorPath(repositoryIdentity: string): string {
+  return path.join(roleGitHome(), "expiry-errors", `${repositoryStateId(repositoryIdentity)}.json`);
+}
+
+interface RepositoryMetadata {
+  repositoryId: string;
+  repositoryInstance: RepositoryInstance;
+  root: string;
+  servers: string[];
+}
+
+interface ExpiryCleanupError {
+  repositoryId: string;
+  generation: string;
+  message: string;
+  recordedAt: string;
+}
+
+interface ExpiryCleanupErrors {
+  repositoryId: string;
+  failures: ExpiryCleanupError[];
+}
+
+interface CompletedLease {
+  version: 1;
+  status: "completed";
+  repositoryId: string;
+  generation: string;
+  completedAt: string;
+}
+
+async function writePrivateJson(destination: string, value: unknown): Promise<void> {
+  const directory = path.dirname(destination);
+  await ensureDurableDirectory(directory);
+  const temporary = `${destination}.${process.pid}.tmp`;
+  const handle = await open(temporary, "wx", 0o600);
+  try {
+    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`);
+    await handle.sync();
+    await handle.close();
+    await rename(temporary, destination);
+    await syncDirectory(directory);
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    await rm(temporary, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+interface LockOwner {
+  pid: number;
+  token: string;
+  createdAt: number;
+}
+
+async function processIsAlive(pid: number): Promise<boolean> {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+async function withStateLock<T>(destination: string, operation: () => Promise<T>): Promise<T> {
+  await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+  const owner: LockOwner = { pid: process.pid, token: randomUUID(), createdAt: Date.now() };
+  const deadline = Date.now() + 30_000;
+  let handle;
+  while (!handle) {
+    try {
+      handle = await open(destination, "wx", 0o600);
+      await handle.writeFile(JSON.stringify(owner));
+      await handle.sync();
+    } catch (error) {
+      const acquired = handle !== undefined;
+      await handle?.close().catch(() => undefined);
+      handle = undefined;
+      if (acquired) await rm(destination, { force: true }).catch(() => undefined);
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      let parsed: Partial<LockOwner>;
+      try {
+        parsed = JSON.parse(await readFile(destination, "utf8")) as Partial<LockOwner>;
+      } catch {
+        try {
+          if (Date.now() - (await lstat(destination)).mtimeMs < 100) {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            continue;
+          }
+        } catch {
+          continue;
+        }
+        throw new Error(`invalid state lock ${destination}; verify no RoleGit process is using it before removal`);
+      }
+      if (typeof parsed.pid !== "number" || typeof parsed.token !== "string") {
+        throw new Error(`invalid state lock ${destination}; verify no RoleGit process is using it before removal`);
+      }
+      if (!(await processIsAlive(parsed.pid))) {
+        throw new Error(`stale state lock ${destination}; verify the owner exited before removal`);
+      }
+      if (Date.now() >= deadline) throw new Error(`timed out waiting for state lock ${destination}`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  try {
+    return await operation();
+  } finally {
+    await handle.close().catch(() => undefined);
+    try {
+      const current = JSON.parse(await readFile(destination, "utf8")) as Partial<LockOwner>;
+      if (current.token === owner.token) await rm(destination, { force: true });
+    } catch {
+      // A missing or replaced lock is not owned by this operation.
+    }
+  }
+}
+
+export function withRepositoryLock<T>(root: string, operation: () => Promise<T>): Promise<T> {
+  if (roleGitMetadataPath(root) !== undefined) {
+    return Promise.reject(new Error("ROLEGIT_HOME must be outside the repository worktree"));
+  }
+  const initialInstance = repositoryInstance(root);
+  return withStateLock(repositoryInstanceLockPath(initialInstance), async () => {
+    const id = repositoryId(root);
+    return withStateLock(repositoryOperationLockPath(id), async () => {
+      const currentRoot = await realpath(root);
+      const currentInstance = repositoryInstance(currentRoot);
+      if (!repositoryInstancesEqual(initialInstance, currentInstance)) {
+        throw new Error("repository root changed while acquiring its state lock");
+      }
+      let metadata: RepositoryMetadata;
+      try {
+        metadata = await loadRepositoryMetadata(root);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        metadata = { repositoryId: id, repositoryInstance: currentInstance, root: currentRoot, servers: [] };
+        await writePrivateJson(repositoryPath(root), metadata);
+      }
+      if (!repositoryInstancesEqual(metadata.repositoryInstance, currentInstance)) {
+        throw new Error(
+          `duplicate RoleGit checkout identity does not match the registered filesystem instance at ${metadata.root}; ` +
+          "do not use copied checkouts until one has a new identity",
+        );
+      }
+      if (!pathNamesEqual(metadata.root, currentRoot)) {
+        await writePrivateJson(repositoryPath(root), { ...metadata, root: currentRoot });
+      }
+      try {
+        for (const failure of (await loadExpiryCleanupErrors(id)).failures) {
+          console.error(`warning: previous expiry cleanup failed: ${failure.message}`);
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      return operation();
+    });
+  });
+}
+
+function withSessionLock<T>(root: string, server: string, operation: () => Promise<T>): Promise<T> {
+  return withStateLock(`${sessionPath(root, server)}.lock`, operation);
+}
+
+export async function saveSessionUnlocked(root: string, session: LocalSession): Promise<void> {
+  await withSessionLock(root, session.server, async () => {
+    try {
+      const existing = await loadSessionFile(root, session.server);
+      if (sessionId(existing) !== sessionId(session)) {
+        throw new Error("another session is active; run `rolegit lock` before logging in again");
+      }
+    } catch (error) {
+      if (!/no RoleGit session|RoleGit session expired/.test((error as Error).message)) throw error;
+    }
+    await writePrivateJson(sessionPath(root, session.server), session);
+  });
+}
+
+export function saveSession(root: string, session: LocalSession): Promise<void> {
+  return withRepositoryLock(root, () => saveSessionUnlocked(root, session));
+}
+
+export async function saveRepositoryServerUnlocked(root: string, server: string): Promise<void> {
+  let metadata: RepositoryMetadata;
+  try {
+    metadata = await loadRepositoryMetadata(root);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    metadata = {
+      repositoryId: repositoryId(root),
+      repositoryInstance: repositoryInstance(root),
+      root: await realpath(root),
+      servers: [],
+    };
+  }
+  await writePrivateJson(repositoryPath(root), {
+    ...metadata,
+    servers: [...new Set([...metadata.servers, server])],
+  });
+}
+
+export function saveRepositoryServer(root: string, server: string): Promise<void> {
+  return withRepositoryLock(root, () => saveRepositoryServerUnlocked(root, server));
+}
+
+async function loadRepositoryMetadataById(repositoryIdentity: string): Promise<RepositoryMetadata> {
+  const source = repositoryPathForId(repositoryIdentity);
+  const repositoryStat = await lstat(source);
+  if (repositoryStat.isSymbolicLink() || !repositoryStat.isFile()) {
+    throw new Error("refusing non-regular repository session metadata");
+  }
+  const parsed = JSON.parse(await readFile(source, "utf8")) as {
+    repositoryId?: unknown;
+    repositoryInstance?: Partial<RepositoryInstance>;
+    root?: unknown;
+    servers?: unknown;
+  };
+  if (
+    parsed.repositoryId !== repositoryIdentity ||
+    typeof parsed.repositoryInstance?.device !== "string" ||
+    !/^\d+$/.test(parsed.repositoryInstance.device) ||
+    typeof parsed.repositoryInstance.inode !== "string" ||
+    !/^\d+$/.test(parsed.repositoryInstance.inode) ||
+    typeof parsed.root !== "string" || !path.isAbsolute(parsed.root) ||
+    !Array.isArray(parsed.servers) ||
+    !parsed.servers.every((server) => typeof server === "string")
+  ) {
+    throw new Error("invalid repository session metadata");
+  }
+  return parsed as RepositoryMetadata;
+}
+
+async function loadRepositoryMetadata(root: string): Promise<RepositoryMetadata> {
+  return loadRepositoryMetadataById(repositoryId(root));
+}
+
+function existingCheckoutId(root: string): string | undefined {
+  let marker: string;
+  try {
+    const prefix = execFileSync("git", ["rev-parse", "--show-prefix"], {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (prefix !== "") return undefined;
+    marker = path.resolve(root, execFileSync("git", ["rev-parse", "--git-path", "rolegit-id"], {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim());
+  } catch {
+    return undefined;
+  }
+  try {
+    const value = readFileSync(marker, "utf8").trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(value)) throw new Error("invalid RoleGit checkout identity");
+    return value;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+export async function resolveRepositoryRoot(repositoryIdentity: string): Promise<string> {
+  const metadata = await loadRepositoryMetadataById(repositoryIdentity);
+  if (/^[a-f0-9]{64}$/.test(repositoryIdentity)) {
+    await stat(metadata.root);
+    if (!repositoryInstancesEqual(metadata.repositoryInstance, repositoryInstance(metadata.root))) {
+      throw new Error(`repository checkout identity is bound to another filesystem instance (${metadata.root})`);
+    }
+    return metadata.root;
+  }
+  const parent = path.dirname(metadata.root);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let entries;
+    try {
+      entries = await readdir(parent, { withFileTypes: true });
+    } catch (error) {
+      throw new Error(`cannot locate checkout ${repositoryIdentity}; expiry cleanup remains pending`, { cause: error });
+    }
+    const matchingInstances: string[] = [];
+    const identityInstances: string[] = [];
+    const candidates = [metadata.root, ...entries
+      .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
+      .map((entry) => path.join(parent, entry.name))];
+    for (const candidate of candidates) {
+      let resolved: string;
+      let instance: RepositoryInstance;
+      try {
+        resolved = await realpath(candidate);
+        instance = repositoryInstanceAtResolvedRoot(resolved);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw error;
+      }
+      const instanceMatches = repositoryInstancesEqual(metadata.repositoryInstance, instance);
+      if (!instanceMatches && existingCheckoutId(candidate) !== repositoryIdentity) continue;
+      if (!identityInstances.some((entry) => pathNamesEqual(entry, resolved))) identityInstances.push(resolved);
+      if (
+        instanceMatches &&
+        !matchingInstances.some((entry) => pathNamesEqual(entry, resolved))
+      ) matchingInstances.push(resolved);
+    }
+    if (matchingInstances.length === 1) return matchingInstances[0]!;
+    if (matchingInstances.length > 1 || identityInstances.length > 1) {
+      throw new Error(`ambiguous checkout identity ${repositoryIdentity}; expiry cleanup remains pending`);
+    }
+  }
+  throw new Error(`cannot locate checkout ${repositoryIdentity}; expiry cleanup remains pending`);
+}
+
+function invalidExpiryCleanupError(): Error {
+  return new Error("invalid expiry cleanup error");
+}
+
+async function loadExpiryCleanupErrors(repositoryIdentity: string): Promise<ExpiryCleanupErrors> {
+  const source = expiryErrorPath(repositoryIdentity);
+  const sourceStat = await lstat(source);
+  if (sourceStat.isSymbolicLink() || !sourceStat.isFile()) throw new Error("refusing non-regular expiry error");
+  const parsed = JSON.parse(await readFile(source, "utf8")) as Partial<ExpiryCleanupErrors>;
+  if (parsed.repositoryId !== repositoryIdentity || !Array.isArray(parsed.failures)) {
+    throw invalidExpiryCleanupError();
+  }
+  for (const failure of parsed.failures) {
+    if (
+      typeof failure !== "object" || failure === null ||
+      failure.repositoryId !== repositoryIdentity ||
+      typeof failure.generation !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(failure.generation) ||
+      typeof failure.message !== "string" ||
+      typeof failure.recordedAt !== "string" ||
+      !Number.isFinite(new Date(failure.recordedAt).getTime())
+    ) throw invalidExpiryCleanupError();
+  }
+  return parsed as ExpiryCleanupErrors;
+}
+
+async function leaseGenerationIsActive(repositoryIdentity: string, generation: string): Promise<boolean> {
+  const source = leasePathForId(repositoryIdentity);
+  let parsed: Partial<MaterializationLease & CompletedLease>;
+  try {
+    const sourceStat = await lstat(source);
+    if (sourceStat.isSymbolicLink() || !sourceStat.isFile()) {
+      throw new Error("refusing non-regular materialization lease");
+    }
+    parsed = JSON.parse(await readFile(source, "utf8")) as Partial<MaterializationLease & CompletedLease>;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  if (
+    parsed.version !== 1 ||
+    parsed.repositoryId !== repositoryIdentity ||
+    typeof parsed.generation !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(parsed.generation)
+  ) throw new Error("invalid materialization lease");
+  if (parsed.status === "completed") {
+    if (
+      typeof parsed.completedAt !== "string" ||
+      !Number.isFinite(new Date(parsed.completedAt).getTime())
+    ) throw new Error("invalid materialization lease tombstone");
+    return false;
+  }
+  if (parsed.status !== undefined) throw new Error("invalid materialization lease");
+  return parsed.generation === generation;
+}
+
+export async function recordExpiryCleanupError(
+  repositoryIdentity: string,
+  generation: string,
+  error: unknown,
+): Promise<boolean> {
+  if (!/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(generation)) throw new Error("invalid lease generation");
+  const source = expiryErrorPath(repositoryIdentity);
+  return withStateLock(repositoryOperationLockPath(repositoryIdentity), async () => {
+    if (!(await leaseGenerationIsActive(repositoryIdentity, generation))) return false;
+    await withStateLock(`${source}.lock`, async () => {
+      let failures: ExpiryCleanupError[] = [];
+      try {
+        failures = (await loadExpiryCleanupErrors(repositoryIdentity)).failures;
+      } catch (loadError) {
+        if ((loadError as NodeJS.ErrnoException).code !== "ENOENT") throw loadError;
+      }
+      const failure: ExpiryCleanupError = {
+        repositoryId: repositoryIdentity,
+        generation,
+        message: (error as Error).message,
+        recordedAt: new Date().toISOString(),
+      };
+      const existing = failures.findIndex((entry) => entry.generation === generation);
+      if (existing === -1) failures.push(failure);
+      else failures[existing] = failure;
+      await writePrivateJson(source, { repositoryId: repositoryIdentity, failures });
+    });
+    return true;
+  });
+}
+
+export async function loadExpiryCleanupError(
+  repositoryIdentity: string,
+  generation?: string,
+): Promise<ExpiryCleanupError> {
+  const failures = (await loadExpiryCleanupErrors(repositoryIdentity)).failures;
+  const failure = generation === undefined
+    ? failures.at(-1)
+    : failures.find((entry) => entry.generation === generation);
+  if (failure) return failure;
+  const error = new Error("no expiry cleanup error") as NodeJS.ErrnoException;
+  error.code = "ENOENT";
+  throw error;
+}
+
+export async function clearExpiryCleanupError(
+  repositoryIdentity: string,
+  generation?: string,
+): Promise<void> {
+  const source = expiryErrorPath(repositoryIdentity);
+  await withStateLock(`${source}.lock`, async () => {
+    if (generation === undefined) {
+      await rm(source, { force: true });
+      return;
+    }
+    let failures: ExpiryCleanupError[];
+    try {
+      failures = (await loadExpiryCleanupErrors(repositoryIdentity)).failures;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    failures = failures.filter((entry) => entry.generation !== generation);
+    if (failures.length === 0) await rm(source, { force: true });
+    else await writePrivateJson(source, { repositoryId: repositoryIdentity, failures });
+  });
+}
+
+async function assertRepositoryRoot(root: string): Promise<void> {
+  let metadata: RepositoryMetadata;
+  try {
+    metadata = await loadRepositoryMetadata(root);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  let matches = false;
+  try {
+    matches = repositoryInstancesEqual(metadata.repositoryInstance, repositoryInstance(root));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (!matches) {
+    throw new Error(`repository checkout identity is bound to another root (${metadata.root})`);
+  }
+}
+
+export async function loadRepositoryServers(root: string): Promise<string[]> {
+  const metadata = await loadRepositoryMetadata(root);
+  if (!repositoryInstancesEqual(metadata.repositoryInstance, repositoryInstance(root))) {
+    throw new Error("repository checkout identity is bound to another root");
+  }
+  return metadata.servers;
+}
+
+async function loadSessionFile(root: string, server: string): Promise<LocalSession> {
+  let parsed: unknown;
+  try {
+    const source = sessionPath(root, server);
+    const sessionStat = await lstat(source);
+    if (sessionStat.isSymbolicLink() || !sessionStat.isFile()) {
+      throw new Error("refusing non-regular local session file");
+    }
+    parsed = JSON.parse(await readFile(source, "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error("no RoleGit session; run `rolegit login` first");
+    }
+    throw error;
+  }
+  if (typeof parsed !== "object" || parsed === null) throw new Error("invalid local session");
+  const session = parsed as Partial<LocalSession>;
+  if (
+    session.server !== server ||
+    typeof session.token !== "string" ||
+    typeof session.expiresAt !== "string" ||
+    typeof session.user?.id !== "number" ||
+    typeof session.user.login !== "string"
+  ) {
+    throw new Error("invalid local session");
+  }
+  const expiresAt = new Date(session.expiresAt).getTime();
+  if (!Number.isFinite(expiresAt)) throw new Error("invalid local session expiration");
+  if (expiresAt <= Date.now()) {
+    await rm(sessionPath(root, server), { force: true });
+    throw new Error("RoleGit session expired; run `rolegit login` again");
+  }
+  return session as LocalSession;
+}
+
+export function loadSessionUnlocked(root: string, server: string): Promise<LocalSession> {
+  return withSessionLock(root, server, () => loadSessionFile(root, server));
+}
+
+export function loadSession(root: string, server: string): Promise<LocalSession> {
+  return withRepositoryLock(root, () => loadSessionUnlocked(root, server));
+}
+
+export async function deleteSessionUnlocked(
+  root: string,
+  server: string,
+  expectedSessionId?: string,
+): Promise<void> {
+  await withSessionLock(root, server, async () => {
+    if (expectedSessionId) {
+      try {
+        const current = await loadSessionFile(root, server);
+        if (sessionId(current) !== expectedSessionId) return;
+      } catch (error) {
+        if (/no RoleGit session|RoleGit session expired/.test((error as Error).message)) return;
+        throw error;
+      }
+    }
+    await rm(sessionPath(root, server), { force: true });
+  });
+}
+
+export function deleteSession(
+  root: string,
+  server: string,
+  expectedSessionId?: string,
+): Promise<void> {
+  return withRepositoryLock(root, () => deleteSessionUnlocked(root, server, expectedSessionId));
+}
+
+export function sessionTimeRemaining(session: LocalSession): number {
+  return Math.max(0, new Date(session.expiresAt).getTime() - Date.now());
+}
+
+export function sessionId(session: LocalSession): string {
+  return createHash("sha256").update(session.token).digest("hex");
+}
+
+function normalizeMaterializedFile(value: unknown, root?: string): MaterializedFile {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("invalid materialization lease");
+  }
+  const file = value as Partial<MaterializedFile>;
+  if (typeof file.path !== "string" || !/^[a-f0-9]{64}$/.test(file.digest ?? "")) {
+    throw new Error("invalid materialization lease");
+  }
+  const protectedPath = normalizePlaintextPath(file.path);
+  const metadataPaths = root === undefined
+    ? []
+    : [...gitMetadataPaths(root), roleGitMetadataPath(root)]
+      .filter((entry): entry is string => entry !== undefined)
+      .map(portablePathKey);
+  const portablePath = portablePathKey(protectedPath);
+  if (metadataPaths.some((metadataPath) =>
+    metadataPath === "." || portablePath === metadataPath || portablePath.startsWith(`${metadataPath}/`))) {
+    throw new Error("materialization lease cannot contain repository metadata");
+  }
+  return { path: protectedPath, digest: file.digest! };
+}
+
+export async function saveLeaseUnlocked(lease: MaterializationLease): Promise<void> {
+  if (!repositoryInstancesEqual(lease.repositoryInstance, repositoryInstance(lease.root))) {
+    throw new Error("materialization lease belongs to another repository instance");
+  }
+  let existing: MaterializationLease | undefined;
+  try {
+    existing = await loadLease(lease.root);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (existing) {
+    if (
+      existing.server !== lease.server ||
+      existing.userId !== lease.userId ||
+      existing.sessionId !== lease.sessionId
+    ) {
+      throw new Error("files are unlocked by a different session; run `rolegit lock` first");
+    }
+  }
+  const paths = new Map(existing?.paths.map((file) => [file.path, file]));
+  for (const file of lease.paths.map((file) => normalizeMaterializedFile(file, lease.root))) {
+    paths.set(file.path, file);
+  }
+  await writePrivateJson(leasePath(lease.root), { ...lease, paths: [...paths.values()] });
+}
+
+export async function replaceLeaseMaterializationsUnlocked(lease: MaterializationLease): Promise<void> {
+  const current = await loadLease(lease.root);
+  if (
+    current.server !== lease.server ||
+    current.userId !== lease.userId ||
+    current.sessionId !== lease.sessionId ||
+    current.generation !== lease.generation
+  ) {
+    throw new Error("files are unlocked by a different session; run `rolegit lock` first");
+  }
+  const paths = new Map<string, MaterializedFile>();
+  for (const file of lease.paths.map((entry) => normalizeMaterializedFile(entry, lease.root))) {
+    paths.set(file.path, file);
+  }
+  if (paths.size === 0) {
+    await deleteLeaseUnlocked(lease.root);
+    return;
+  }
+  await writePrivateJson(leasePath(lease.root), { ...lease, paths: [...paths.values()] });
+}
+
+export function saveLease(lease: MaterializationLease): Promise<void> {
+  return withRepositoryLock(lease.root, () => saveLeaseUnlocked(lease));
+}
+
+export async function refreshLeaseMaterializationUnlocked(
+  root: string,
+  session: LocalSession,
+  file: MaterializedFile,
+): Promise<void> {
+  let lease: MaterializationLease;
+  try {
+    lease = await loadLease(root);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  const index = lease.paths.findIndex((entry) => entry.path === file.path);
+  if (index === -1) return;
+  if (
+    lease.server !== session.server ||
+    lease.userId !== session.user.id ||
+    lease.sessionId !== sessionId(session)
+  ) {
+    throw new Error("materialized file belongs to a different session; run `rolegit lock` first");
+  }
+  lease.paths[index] = normalizeMaterializedFile(file, root);
+  lease.expiresAt = session.expiresAt;
+  await writePrivateJson(leasePath(root), lease);
+}
+
+export function refreshLeaseMaterialization(
+  root: string,
+  session: LocalSession,
+  file: MaterializedFile,
+): Promise<void> {
+  return withRepositoryLock(root, () => refreshLeaseMaterializationUnlocked(root, session, file));
+}
+
+export async function loadLease(root: string): Promise<MaterializationLease> {
+  await assertRepositoryRoot(root);
+  const source = leasePath(root);
+  const leaseStat = await lstat(source);
+  if (leaseStat.isSymbolicLink() || !leaseStat.isFile()) {
+    throw new Error("refusing non-regular materialization lease");
+  }
+  const parsed: unknown = JSON.parse(await readFile(source, "utf8"));
+  if (typeof parsed !== "object" || parsed === null) throw new Error("invalid materialization lease");
+  const lease = parsed as Partial<MaterializationLease & CompletedLease>;
+  if (lease.status === "completed") {
+    if (
+      lease.version !== 1 ||
+      lease.repositoryId !== repositoryId(root) ||
+      typeof lease.generation !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(lease.generation) ||
+      typeof lease.completedAt !== "string" ||
+      !Number.isFinite(new Date(lease.completedAt).getTime())
+    ) throw new Error("invalid materialization lease tombstone");
+    const error = new Error("no materialization lease") as NodeJS.ErrnoException;
+    error.code = "ENOENT";
+    throw error;
+  }
+  if (
+    lease.status !== undefined ||
+    lease.version !== 1 ||
+    lease.repositoryId !== repositoryId(root) ||
+    typeof lease.repositoryInstance?.device !== "string" ||
+    !/^\d+$/.test(lease.repositoryInstance.device) ||
+    typeof lease.repositoryInstance.inode !== "string" ||
+    !/^\d+$/.test(lease.repositoryInstance.inode) ||
+    !repositoryInstancesEqual(lease.repositoryInstance, repositoryInstance(root)) ||
+    typeof lease.generation !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(lease.generation) ||
+    typeof lease.root !== "string" ||
+    typeof lease.server !== "string" ||
+    typeof lease.expiresAt !== "string" ||
+    !Number.isSafeInteger(lease.userId) ||
+    (lease.userId ?? 0) <= 0 ||
+    !/^[a-f0-9]{64}$/.test(lease.sessionId ?? "") ||
+    !Array.isArray(lease.paths) ||
+    !Number.isFinite(new Date(lease.expiresAt).getTime())
+  ) throw new Error("invalid materialization lease");
+  return {
+    ...(lease as MaterializationLease),
+    paths: lease.paths.map((file) => normalizeMaterializedFile(file, root)),
+  };
+}
+
+export async function deleteLeaseUnlocked(root: string): Promise<void> {
+  let lease: MaterializationLease;
+  try {
+    lease = await loadLease(root);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  const completed: CompletedLease = {
+    version: 1,
+    status: "completed",
+    repositoryId: lease.repositoryId,
+    generation: lease.generation,
+    completedAt: new Date().toISOString(),
+  };
+  await writePrivateJson(leasePath(root), completed);
+}
+
+export function deleteLease(root: string): Promise<void> {
+  return withRepositoryLock(root, () => deleteLeaseUnlocked(root));
+}

@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "sessionMinutes": 60,
+  "keyId": "development-key-1",
+  "developmentUsers": [
+    {
+      "id": 12345678,
+      "login": "local-developer"
+    }
+  ],
+  "vaults": {
+    "COPY_VAULT_ID_FROM_ENCLIST": {
+      "repository": "owner/repository",
+      "files": {
+        ".env": {
+          "users": [12345678],
+          "teams": [
+            {
+              "organization": "owner",
+              "slug": "platform"
+            }
+          ]
+        }
+      }
+    }
+  }
+}
