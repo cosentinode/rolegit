@@ -38,6 +38,19 @@ jobs:
       - run: npm ci
       - run: npm run build
 
+  pr-title-tests:
+    name: PR title logic tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+      - run: npm run test:pr-title
+
   test:
     name: Tests (${{ matrix.os }})
     strategy:
