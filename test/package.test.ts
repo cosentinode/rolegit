@@ -8,7 +8,7 @@ import test from "node:test";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
-test("public docs preserve revocation, key-lifetime, and v1 parsing boundaries", async () => {
+test("public docs preserve architecture, release, and parsing boundaries", async () => {
   const [readme, security, architecture, protocols] = await Promise.all([
     readFile(path.join(projectRoot, "README.md"), "utf8"),
     readFile(path.join(projectRoot, "docs/security.md"), "utf8"),
@@ -18,13 +18,27 @@ test("public docs preserve revocation, key-lifetime, and v1 parsing boundaries",
   assert.match(readme, /Git\/customer synchronization path remains trusted for signed-state freshness/);
   assert.match(readme, /does not revoke older\s+ciphertext and wrapped keys retained in Git history/);
   assert.match(readme, /encrypted-object, `\.enclist`, and server-policy readers/);
+  assert.match(readme, /`develop` is the integration branch and the base for feature and maintenance pull requests/);
+  assert.match(readme, /`main`\s+contains stable release history and is the base for reviewed release-promotion pull requests/);
   assert.match(security, /stale or split view can delay revocation for future seals/);
   assert.match(security, /persisted wrapped DEKs and DEKs already\s+released to clients do not acquire that session expiry/);
   assert.match(architecture, /inside Community's authorization-freshness\s+boundary/);
   assert.match(architecture, /removed recipient who retains that private key can later\s+check out and decrypt an older commit/);
   assert.match(architecture, /Credentials, sessions, or tokens expire independently/);
+  const diagrams = architecture.match(/```mermaid\n[\s\S]*?\n```/g) ?? [];
+  assert.equal(diagrams.length, 6);
+  for (const diagram of diagrams) {
+    assert.match(diagram, /\|seal:/);
+    assert.match(diagram, /\|unlock:/);
+    assert.match(diagram, /plaintext-DEK holder/);
+  }
+  assert.equal([...architecture.matchAll(/generates and unwraps plaintext DEKs; decrypt-capable/g)].length, 3);
+  assert.equal([...architecture.matchAll(/seal: return plaintext DEK and wrapped DEK/g)].length, 3);
+  assert.equal([...architecture.matchAll(/unlock: return plaintext DEK after/g)].length, 3);
   assert.match(protocols, /silently ignore unknown object fields/);
   assert.match(protocols, /not fail-closed extensibility/);
+  assert.match(protocols, /`develop` is the integration branch and the base for feature and maintenance pull requests/);
+  assert.match(protocols, /`main` contains stable release history and is the base for reviewed release-promotion pull requests/);
 });
 
 test("package rebuild excludes stale output and includes required files", async (context) => {

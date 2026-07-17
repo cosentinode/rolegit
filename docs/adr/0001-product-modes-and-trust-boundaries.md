@@ -110,11 +110,11 @@ the customer's synchronization path remain trusted to deliver fresh, globally co
 ```mermaid
 flowchart LR
     R[Customer policy root] -->|signed policy and recipient snapshot| G[Git host: cannot decrypt]
-    G -->|signed public state| A[Authorized sealing device: decrypt-capable]
+    G -->|signed public state| A[Authorized sealing device: plaintext-DEK holder and decrypt-capable]
     O[Existing device or customer recovery] -->|authenticated root and checkpoint bootstrap| A
-    A -->|verify state, encrypt locally, and wrap DEK to recipients| G
-    G -->|clone or pull encrypted object| B[Authorized recipient device: decrypt-capable]
-    B -->|private key unwrap and local decrypt| P[Plaintext on authorized device]
+    A -->|seal: verify state, generate plaintext DEK, encrypt, and wrap DEK to recipients| G
+    G -->|unlock: encrypted object and wrapped DEK| B[Authorized recipient device: plaintext-DEK holder and decrypt-capable]
+    B -->|unlock: unwrap plaintext DEK with private key and decrypt locally| P[Plaintext on authorized device]
     C[RoleGit Cloud: cannot decrypt; absent from content and key paths]
 ```
 
@@ -133,11 +133,11 @@ obtain encrypted objects from Git and decrypt locally.
 ```mermaid
 flowchart LR
     R[Customer policy root] -->|signed policy and recipient snapshot| T[RoleGit Team: metadata only; cannot decrypt]
-    O[Existing device or customer recovery] -->|authenticated root and checkpoint bootstrap| S[Authorized sealing device]
+    O[Existing device or customer recovery] -->|authenticated root and checkpoint bootstrap| S[Authorized sealing device: plaintext-DEK holder and decrypt-capable]
     T -->|signed state and untrusted membership inputs| S
-    S -->|verify state, encrypt, and wrap new DEK to recipients| G[Git host: cannot decrypt]
-    G -->|encrypted object and wrapped DEK| D[Authorized recipient device: decrypt-capable]
-    D -->|private key unwrap and local decrypt| P[Plaintext on authorized device]
+    S -->|seal: verify state, generate plaintext DEK, encrypt, and wrap DEK to recipients| G[Git host: cannot decrypt]
+    G -->|unlock: encrypted object and wrapped DEK| D[Authorized recipient device: plaintext-DEK holder and decrypt-capable]
+    D -->|unlock: unwrap plaintext DEK with private key and decrypt locally| P[Plaintext on authorized device]
 ```
 
 Only a device holding an authorized recipient or recovery private key can directly decrypt. RoleGit
@@ -150,13 +150,20 @@ Git history.
 
 An Enterprise client or customer agent may invoke the customer's KMS directly. RoleGit Cloud may
 provide the same optional metadata coordination as Team, but it is not in the key path. KMS policy,
-availability, audit, rotation, and revocation are customer responsibilities.
+availability, audit, rotation, and revocation are customer responsibilities. For sealing, the client
+requests a fresh data key and the KMS returns both its plaintext and wrapped forms. The client encrypts
+locally and persists only the ciphertext and wrapped DEK. For unlock, the KMS authorizes the wrapped
+DEK and authenticated context before returning the plaintext DEK to the client.
 
 ```mermaid
 flowchart LR
-    G[Git host: cannot decrypt] --> D[Authorized client or customer agent: decrypt-capable]
-    D <-->|wrapped DEK and authenticated context| K[Customer KMS: key authority and decrypt-capable]
-    D -->|local decrypt after authorized unwrap| P[Plaintext on customer device]
+    D[Authorized client or customer agent: plaintext-DEK holder and decrypt-capable] -->|seal: request fresh data key with authenticated context| K[Customer KMS: generates and unwraps plaintext DEKs; decrypt-capable]
+    K -->|seal: return plaintext DEK and wrapped DEK| D
+    D -->|seal: encrypt locally; store ciphertext and wrapped DEK| G[Git host: cannot decrypt]
+    G -->|unlock: encrypted object and wrapped DEK| D
+    D -->|unlock: request unwrap with wrapped DEK and authenticated context| K
+    K -->|unlock: return plaintext DEK after authorization| D
+    D -->|unlock: decrypt locally with plaintext DEK| P[Plaintext on customer device]
     D <-->|optional metadata only| T[RoleGit Team: cannot decrypt]
 ```
 
@@ -180,23 +187,29 @@ authorized devices can decrypt.
 ```mermaid
 flowchart LR
     R[Customer policy root] -->|signed policy and recipient snapshot| C[Customer content-blind coordinator: cannot decrypt]
-    C -->|signed metadata only| S[Authorized customer sealing device]
-    S -->|verify state, encrypt, and wrap DEK to recipients| G[Git host: cannot decrypt]
-    G -->|encrypted object and wrapped DEK| D[Authorized customer recipient device: decrypt-capable]
-    D -->|private key unwrap and local decrypt| P[Plaintext on customer device]
+    C -->|signed metadata only| S[Authorized customer sealing device: plaintext-DEK holder and decrypt-capable]
+    S -->|seal: verify state, generate plaintext DEK, encrypt, and wrap DEK to recipients| G[Git host: cannot decrypt]
+    G -->|unlock: encrypted object and wrapped DEK| D[Authorized customer recipient device: plaintext-DEK holder and decrypt-capable]
+    D -->|unlock: unwrap plaintext DEK with private key and decrypt locally| P[Plaintext on customer device]
     L[RoleGit Cloud: cannot decrypt; absent from deployment and key path]
 ```
 
 #### Customer Key Broker
 
-The customer-operated service and its KMS/KEK authorize and unwrap DEKs. The broker boundary is
-therefore decrypt-capable and must be secured as customer key infrastructure.
+The customer-operated service and its KMS/KEK generate and unwrap DEKs. For sealing, that boundary
+returns a fresh plaintext DEK and its wrapped form to the client; for unlock, it returns the plaintext
+DEK only after authorizing the wrapped DEK and context. The broker boundary is therefore
+decrypt-capable and must be secured as customer key infrastructure.
 
 ```mermaid
 flowchart LR
-    G[Git host: cannot decrypt] -->|encrypted object and wrapped DEK| D[Authorized customer client: decrypt-capable]
-    D <-->|wrapped DEK and authorized unwrap| B[Customer key broker and KMS: decrypt-capable]
-    D -->|local decrypt| P[Plaintext on customer device]
+    D[Authorized customer client: plaintext-DEK holder and decrypt-capable] -->|seal: request fresh data key with authenticated context| B[Customer key broker and KMS: generates and unwraps plaintext DEKs; decrypt-capable]
+    B -->|seal: return plaintext DEK and wrapped DEK| D
+    D -->|seal: encrypt locally; store ciphertext and wrapped DEK| G[Git host: cannot decrypt]
+    G -->|unlock: encrypted object and wrapped DEK| D
+    D -->|unlock: request unwrap with wrapped DEK and authenticated context| B
+    B -->|unlock: return plaintext DEK after authorization| D
+    D -->|unlock: decrypt locally with plaintext DEK| P[Plaintext on customer device]
     R[RoleGit Cloud: absent from deployment and key path]
 ```
 
@@ -219,9 +232,13 @@ recipient model replace or isolate it. It must not be deployed with real secrets
 
 ```mermaid
 flowchart LR
-    G[Git host: cannot decrypt] --> D[Prototype client: decrypt-capable]
-    D <-->|wrapped DEK and plaintext DEK| S[Customer-run experimental service: KEK holder and decrypt-capable]
-    D -->|local decrypt| P[Plaintext on client]
+    D[Prototype client: plaintext-DEK holder and decrypt-capable] -->|seal: authorized fresh data-key request| S[Customer-run experimental service: generates and unwraps plaintext DEKs; decrypt-capable]
+    S -->|seal: return plaintext DEK and wrapped DEK| D
+    D -->|seal: encrypt locally; store ciphertext and wrapped DEK| G[Git host: cannot decrypt]
+    G -->|unlock: encrypted object and wrapped DEK| D
+    D -->|unlock: request unwrap with wrapped DEK and authorization context| S
+    S -->|unlock: return plaintext DEK after policy check| D
+    D -->|unlock: decrypt locally with plaintext DEK| P[Plaintext on client]
     R[RoleGit Cloud: not a public SaaS for this prototype]
 ```
 

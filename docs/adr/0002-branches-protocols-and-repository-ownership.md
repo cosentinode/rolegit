@@ -16,8 +16,8 @@ implementation. The repository also needs a predictable path from development to
 - `develop` is the integration branch and the base for feature and maintenance pull requests.
 - Once release automation is enabled, successful releases from `develop` use a prerelease channel such
   as npm `next`. They are not stable releases.
-- `main` contains stable release history. Changes reach `main` through a reviewed release-promotion
-  pull request from tested `develop` history, not through direct development.
+- `main` contains stable release history and is the base for reviewed release-promotion pull requests
+  from tested `develop` history, not direct development.
 - Direct pushes are not part of either branch workflow. CI, review, and release controls are enforced
   through pull requests.
 - Stable tags and artifacts are produced from `main`; prerelease tags and artifacts are produced from

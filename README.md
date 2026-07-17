@@ -102,9 +102,9 @@ Development authentication is deliberately unsafe and only binds to the loopback
 
 ## Development Policy
 
-`develop` is the integration branch and the base for all pull requests. `main` is release-oriented;
-changes reach it through the release process rather than direct development work. All changes must
-land through a pull request.
+`develop` is the integration branch and the base for feature and maintenance pull requests. `main`
+contains stable release history and is the base for reviewed release-promotion pull requests from
+tested `develop` history, not direct development. All changes must land through a pull request.
 
 ## GitHub Login
 
