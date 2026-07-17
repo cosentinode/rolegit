@@ -16,7 +16,10 @@
   "scripts": {
     "build": "tsc",
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "typecheck": "tsc --noEmit",
     "prepack": "npm run clean && npm run build",
+    "package:check": "npm pack --dry-run",
+    "smoke": "npm run build && node dist/src/cli.js --help",
     "test": "npm run build && node --test dist/test/*.test.js",
     "start": "node dist/src/cli.js"
   },
