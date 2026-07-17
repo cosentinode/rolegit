@@ -90,6 +90,36 @@ test("policies reject Unicode Windows case equivalents", () => {
   }), /differ only by case/);
 });
 
+test("client and server policies reject path hierarchy conflicts in either insertion order", () => {
+  const rule = { users: [101], teams: [] };
+  for (const protectedPaths of [
+    ["Secret", "secret/nested.env"],
+    ["secret/nested.env", "Secret"],
+  ]) {
+    const clientFiles = Object.fromEntries(protectedPaths.map((protectedPath) => [
+      protectedPath,
+      { object: encryptedObjectPath(protectedPath) },
+    ]));
+    assert.throws(() => parseEnclist({
+      version: 1,
+      vaultId: "vault",
+      authServer: "http://127.0.0.1:8787",
+      files: clientFiles,
+    }), /ancestors or descendants/);
+    assert.throws(() => parseServerPolicy({
+      version: 1,
+      sessionMinutes: 60,
+      keyId: "dev",
+      vaults: {
+        vault: {
+          repository: "acme/project",
+          files: Object.fromEntries(protectedPaths.map((protectedPath) => [protectedPath, rule])),
+        },
+      },
+    }), /ancestors or descendants/);
+  }
+});
+
 test("encrypted object paths are deterministic and opaque", () => {
   const objectPath = encryptedObjectPath(".env.production");
   assert.match(objectPath, /^\.rolegit\/vault\/[a-f0-9]{64}\.json$/);

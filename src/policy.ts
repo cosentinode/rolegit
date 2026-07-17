@@ -58,6 +58,14 @@ export function validateAuthServer(value: string): void {
   }
 }
 
+export function protectedPathHierarchyConflict(paths: Iterable<string>, candidate: string): string | undefined {
+  const portableCandidate = portablePathKey(candidate);
+  return [...paths].find((entry) => {
+    const portableEntry = portablePathKey(entry);
+    return portableCandidate.startsWith(`${portableEntry}/`) || portableEntry.startsWith(`${portableCandidate}/`);
+  });
+}
+
 export function parseEnclist(value: unknown): Enclist {
   const root = object(value, ENCLIST_NAME);
   if (root.version !== 1) throw new Error("unsupported .enclist version");
@@ -74,6 +82,10 @@ export function parseEnclist(value: unknown): Enclist {
     const alias = portablePaths.get(portablePath);
     if (alias !== undefined && alias !== protectedPath) {
       throw new Error(`protected paths differ only by case: ${alias}, ${protectedPath}`);
+    }
+    const hierarchyConflict = protectedPathHierarchyConflict(portablePaths.values(), protectedPath);
+    if (hierarchyConflict !== undefined) {
+      throw new Error(`protected paths cannot be ancestors or descendants: ${hierarchyConflict}, ${protectedPath}`);
     }
     portablePaths.set(portablePath, protectedPath);
     const file = object(rawFile, `files.${protectedPath}`);
@@ -164,6 +176,10 @@ export function parseServerPolicy(value: unknown): ServerPolicy {
       const alias = portablePaths.get(portablePath);
       if (alias !== undefined && alias !== protectedPath) {
         throw new Error(`protected paths differ only by case: ${alias}, ${protectedPath}`);
+      }
+      const hierarchyConflict = protectedPathHierarchyConflict(portablePaths.values(), protectedPath);
+      if (hierarchyConflict !== undefined) {
+        throw new Error(`protected paths cannot be ancestors or descendants: ${hierarchyConflict}, ${protectedPath}`);
       }
       portablePaths.set(portablePath, protectedPath);
       files[protectedPath] = parseAccessRule(rawRule, `vaults.${vaultId}.files.${protectedPath}`);

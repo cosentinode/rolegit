@@ -24,6 +24,7 @@ import {
   encryptedObjectPath,
   loadEnclist,
   normalizePlaintextPath,
+  protectedPathHierarchyConflict,
   saveEnclist,
 } from "./policy.js";
 import { portablePathKey } from "./paths.js";
@@ -85,6 +86,10 @@ async function protectUnlocked(root: string, inputPath: string): Promise<void> {
   const caseAlias = Object.keys(policy.files).find((entry) =>
     entry !== protectedPath && portablePathKey(entry) === portablePathKey(protectedPath));
   if (caseAlias) throw new Error(`${protectedPath} differs only by case from protected path ${caseAlias}`);
+  const hierarchyConflict = protectedPathHierarchyConflict(Object.keys(policy.files), protectedPath);
+  if (hierarchyConflict) {
+    throw new Error(`${protectedPath} is an ancestor or descendant of protected path ${hierarchyConflict}`);
+  }
   if (gitPathIsTracked(root, protectedPath)) {
     throw new Error(`${protectedPath} is already tracked; remove it from Git history before protecting it`);
   }

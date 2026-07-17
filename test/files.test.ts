@@ -69,6 +69,22 @@ test("protect rejects a case alias of an existing protected path", async (contex
   await assert.rejects(() => protect(root, "config.env"), /differs only by case/);
 });
 
+test("protect rejects protected path ancestors and descendants in either insertion order", async (context) => {
+  const parent = await temporaryDirectory(context, "rolegit-path-hierarchy-");
+  for (const [index, protectedPaths] of [
+    ["secret", "secret/nested.env"],
+    ["secret/nested.env", "secret"],
+  ].entries()) {
+    const root = path.join(parent, `repository-${index}`);
+    await mkdir(root);
+    execFileSync("git", ["init", "--quiet"], { cwd: root });
+    await initialize(root, "http://127.0.0.1:8787");
+    await protect(root, protectedPaths[0]!);
+
+    await assert.rejects(() => protect(root, protectedPaths[1]!), /ancestor or descendant/);
+  }
+});
+
 test("protect rejects tracked and historical path case aliases", async (context) => {
   const root = await temporaryDirectory(context, "rolegit-git-case-alias-");
   execFileSync("git", ["init", "--quiet"], { cwd: root });
@@ -240,6 +256,30 @@ test("protect excludes an environment-selected in-worktree Git index", async (co
   policy.files["control/index"] = { object: encryptedObjectPath("control/index") };
   await writeFile(path.join(root, ".enclist"), `${JSON.stringify(policy)}\n`);
   await assert.rejects(() => loadEnclist(root), /metadata cannot be protected/);
+});
+
+test("protect and injected policies exclude recursive Git alternate object stores", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-git-alternates-");
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  const firstAlternate = path.join(root, "alternate-objects");
+  const nestedAlternate = path.join(root, "nested-objects");
+  await mkdir(path.join(firstAlternate, "info"), { recursive: true });
+  await mkdir(path.join(nestedAlternate, "info"), { recursive: true });
+  await writeFile(path.join(root, ".git", "objects", "info", "alternates"), `${firstAlternate}\n`);
+  await writeFile(path.join(firstAlternate, "info", "alternates"), "../nested-objects\n");
+  await initialize(root, "http://127.0.0.1:8787");
+
+  await assert.rejects(
+    () => protect(root, "alternate-objects/object-file"),
+    /metadata cannot be protected/,
+  );
+  const policy = await loadEnclist(root);
+  policy.files["nested-objects/object-file"] = { object: encryptedObjectPath("nested-objects/object-file") };
+  await writeFile(path.join(root, ".enclist"), `${JSON.stringify(policy)}\n`);
+  await assert.rejects(() => loadEnclist(root), /metadata cannot be protected/);
+
+  await writeFile(path.join(firstAlternate, "info", "alternates"), "\"unterminated\n");
+  await assert.rejects(() => loadEnclist(root), /malformed Git alternate object configuration/);
 });
 
 test("prototype-named plaintext paths remain ordinary policy entries", async (context) => {

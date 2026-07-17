@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstatSync, realpathSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { lstat, mkdir, open, readFile, readdir, rename, rm } from "node:fs/promises";
 import path from "node:path";
 
@@ -87,6 +87,90 @@ function gitPath(root: string, args: string[]): string {
   }
 }
 
+function parseGitAlternates(value: string, separator: string): string[] {
+  const entries: string[] = [];
+  let offset = 0;
+  while (offset < value.length) {
+    const end = value.indexOf(separator, offset);
+    const entryEnd = end === -1 ? value.length : end;
+    if (value[offset] === "#") {
+      offset = entryEnd + 1;
+      continue;
+    }
+    if (value[offset] !== "\"") {
+      const entry = value.slice(offset, entryEnd);
+      if (entry.includes("\0")) throw new Error("malformed Git alternate object configuration");
+      if (entry.length > 0) entries.push(entry);
+      offset = entryEnd + 1;
+      continue;
+    }
+
+    let entry = "";
+    let index = offset + 1;
+    for (; index < value.length && value[index] !== "\""; index += 1) {
+      const character = value[index]!;
+      if (character !== "\\") {
+        entry += character;
+        continue;
+      }
+      const escaped = value[++index];
+      const escapes: Record<string, string> = {
+        a: "\x07", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v", "\\": "\\", "\"": "\"",
+      };
+      if (escaped !== undefined && Object.hasOwn(escapes, escaped)) {
+        entry += escapes[escaped];
+        continue;
+      }
+      const octal = value.slice(index, index + 3);
+      if (!/^[0-3][0-7]{2}$/.test(octal)) throw new Error("malformed Git alternate object configuration");
+      entry += String.fromCharCode(Number.parseInt(octal, 8));
+      index += 2;
+    }
+    if (index >= value.length || (index + 1 < value.length && value[index + 1] !== separator)) {
+      throw new Error("malformed Git alternate object configuration");
+    }
+    if (entry.includes("\0")) throw new Error("malformed Git alternate object configuration");
+    if (entry.length > 0) entries.push(entry);
+    offset = index + 2;
+  }
+  return entries;
+}
+
+function gitAlternateObjectPaths(root: string, objectDirectory: string): string[] {
+  const candidates: string[] = [];
+  const pending = [{ candidate: objectDirectory, required: false }];
+  if (process.env.GIT_ALTERNATE_OBJECT_DIRECTORIES) {
+    pending.push(...parseGitAlternates(process.env.GIT_ALTERNATE_OBJECT_DIRECTORIES, path.delimiter)
+      .map((candidate) => ({ candidate: path.resolve(root, candidate), required: true })));
+  }
+  const visited = new Set<string>();
+  while (pending.length > 0) {
+    const { candidate, required } = pending.shift()!;
+    const absolute = path.resolve(root, candidate);
+    const resolved = realpathWithMissingSuffix(absolute);
+    candidates.push(absolute);
+    if (visited.has(resolved)) continue;
+    visited.add(resolved);
+    try {
+      if (!lstatSync(resolved).isDirectory()) throw new Error("not a directory");
+    } catch (error) {
+      if (!required && (error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw new Error(`invalid Git alternate object directory: ${absolute}`, { cause: error });
+    }
+    let content: string;
+    try {
+      content = new TextDecoder("utf-8", { fatal: true })
+        .decode(readFileSync(path.join(resolved, "info", "alternates")));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw new Error(`cannot read Git alternate object configuration: ${resolved}`, { cause: error });
+    }
+    pending.push(...parseGitAlternates(content, "\n")
+      .map((entry) => ({ candidate: path.resolve(resolved, entry), required: true })));
+  }
+  return candidates;
+}
+
 export function gitMetadataPaths(root: string): string[] {
   let hasGitEntry = true;
   try {
@@ -96,11 +180,12 @@ export function gitMetadataPaths(root: string): string[] {
     hasGitEntry = false;
   }
   if (!hasGitEntry && process.env.GIT_DIR === undefined && process.env.GIT_WORK_TREE === undefined) return [];
+  const objectDirectory = gitPath(root, ["--git-path", "objects"]);
   const candidates = [
     gitPath(root, ["--absolute-git-dir"]),
     gitPath(root, ["--git-common-dir"]),
     gitPath(root, ["--git-path", "index"]),
-    gitPath(root, ["--git-path", "objects"]),
+    ...gitAlternateObjectPaths(root, objectDirectory),
     gitPath(root, ["--git-path", "shallow"]),
     gitPath(root, ["--git-path", "info/grafts"]),
   ];
@@ -114,9 +199,6 @@ export function gitMetadataPaths(root: string): string[] {
   ]) {
     const value = process.env[name];
     if (value) candidates.push(value);
-  }
-  if (process.env.GIT_ALTERNATE_OBJECT_DIRECTORIES) {
-    candidates.push(...process.env.GIT_ALTERNATE_OBJECT_DIRECTORIES.split(path.delimiter).filter(Boolean));
   }
   return [...new Set(candidates
     .map((candidate) => worktreeMetadataPath(root, candidate))
