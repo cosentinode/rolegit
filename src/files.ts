@@ -171,6 +171,27 @@ function gitAlternateObjectPaths(root: string, objectDirectory: string): string[
   return candidates;
 }
 
+function gitConfigPaths(root: string): string[] {
+  let output: string;
+  try {
+    output = execFileSync("git", ["config", "--includes", "--null", "--show-origin", "--name-only", "--list"], {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (error) {
+    gitFailure("config --list", error);
+  }
+  const fields = output.split("\0");
+  if (fields.pop() !== "" || fields.length % 2 !== 0) throw new Error("malformed Git config origin output");
+  const origins: string[] = [];
+  for (let index = 0; index < fields.length; index += 2) {
+    const origin = fields[index]!;
+    if (origin.startsWith("file:")) origins.push(origin.slice("file:".length));
+  }
+  return origins;
+}
+
 export function gitMetadataPaths(root: string): string[] {
   let hasGitEntry = true;
   try {
@@ -188,6 +209,7 @@ export function gitMetadataPaths(root: string): string[] {
     ...gitAlternateObjectPaths(root, objectDirectory),
     gitPath(root, ["--git-path", "shallow"]),
     gitPath(root, ["--git-path", "info/grafts"]),
+    ...gitConfigPaths(root),
   ];
   for (const name of [
     "GIT_INDEX_FILE",

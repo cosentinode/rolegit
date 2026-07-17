@@ -11,6 +11,7 @@ import {
   gitPathExistsInHistory,
   gitPathIsIgnored,
   gitPathIsTracked,
+  gitMetadataPaths,
   materializationDigest,
   removeMaterializedFile,
 } from "../src/files.js";
@@ -254,6 +255,66 @@ test("protect excludes an environment-selected in-worktree Git index", async (co
   await assert.rejects(() => protect(root, "CONTROL/index"), /metadata cannot be protected/);
   const policy = await loadEnclist(root);
   policy.files["control/index"] = { object: encryptedObjectPath("control/index") };
+  await writeFile(path.join(root, ".enclist"), `${JSON.stringify(policy)}\n`);
+  await assert.rejects(() => loadEnclist(root), /metadata cannot be protected/);
+});
+
+test("protect and injected policies exclude active Git config includes", async (context) => {
+  const parent = await temporaryDirectory(context, "rolegit-git-config-includes-");
+  const root = path.join(parent, "repository");
+  await mkdir(root);
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  const globalConfig = path.join(parent, "global.gitconfig");
+  const directConfig = path.join(root, "active.gitconfig");
+  const nestedConfig = path.join(root, "config", "nested.gitconfig");
+  const conditionalConfig = path.join(root, "conditional.gitconfig");
+  const inactiveConfig = path.join(root, "inactive.gitconfig");
+  const outsideConfig = path.join(parent, "repository-boundary.gitconfig");
+  await mkdir(path.dirname(nestedConfig));
+  for (const [configPath, name] of [
+    [directConfig, "Direct Include"],
+    [nestedConfig, "Nested Include"],
+    [conditionalConfig, "Conditional Include"],
+    [inactiveConfig, "Inactive Include"],
+    [outsideConfig, "Outside Include"],
+  ] as const) {
+    execFileSync("git", ["config", "--file", configPath, "user.name", name]);
+  }
+  execFileSync("git", ["config", "--file", directConfig, "include.path", nestedConfig]);
+  execFileSync("git", ["config", "--file", globalConfig, "--add", "include.path", directConfig]);
+  execFileSync("git", ["config", "--file", globalConfig, "--add", "include.path", outsideConfig]);
+  const gitDirectory = execFileSync("git", ["rev-parse", "--absolute-git-dir"], {
+    cwd: root,
+    encoding: "utf8",
+  }).trim().split(path.sep).join("/");
+  execFileSync("git", [
+    "config", "--file", globalConfig,
+    `includeIf.gitdir:${gitDirectory}.path`, conditionalConfig,
+  ]);
+  execFileSync("git", [
+    "config", "--file", globalConfig,
+    `includeIf.gitdir:${gitDirectory}-other.path`, inactiveConfig,
+  ]);
+  const previousGlobalConfig = process.env.GIT_CONFIG_GLOBAL;
+  process.env.GIT_CONFIG_GLOBAL = globalConfig;
+  context.after(() => {
+    if (previousGlobalConfig === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+    else process.env.GIT_CONFIG_GLOBAL = previousGlobalConfig;
+  });
+
+  const metadataPaths = gitMetadataPaths(root);
+  assert.equal(metadataPaths.includes("active.gitconfig"), true);
+  assert.equal(metadataPaths.includes("config/nested.gitconfig"), true);
+  assert.equal(metadataPaths.includes("conditional.gitconfig"), true);
+  assert.equal(metadataPaths.includes("inactive.gitconfig"), false);
+  assert.equal(metadataPaths.includes("../repository-boundary.gitconfig"), false);
+  await initialize(root, "http://127.0.0.1:8787");
+
+  await assert.rejects(() => protect(root, "active.gitconfig"), /metadata cannot be protected/);
+  await assert.rejects(() => protect(root, "conditional.gitconfig"), /metadata cannot be protected/);
+  await protect(root, "inactive.gitconfig");
+  const policy = await loadEnclist(root);
+  policy.files["config/nested.gitconfig"] = { object: encryptedObjectPath("config/nested.gitconfig") };
   await writeFile(path.join(root, ".enclist"), `${JSON.stringify(policy)}\n`);
   await assert.rejects(() => loadEnclist(root), /metadata cannot be protected/);
 });
