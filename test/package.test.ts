@@ -8,7 +8,7 @@ import test from "node:test";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
-test("public docs preserve freshness and v1 extensibility boundaries", async () => {
+test("public docs preserve revocation, key-lifetime, and v1 parsing boundaries", async () => {
   const [readme, security, architecture, protocols] = await Promise.all([
     readFile(path.join(projectRoot, "README.md"), "utf8"),
     readFile(path.join(projectRoot, "docs/security.md"), "utf8"),
@@ -16,8 +16,13 @@ test("public docs preserve freshness and v1 extensibility boundaries", async () 
     readFile(path.join(projectRoot, "docs/adr/0002-branches-protocols-and-repository-ownership.md"), "utf8"),
   ]);
   assert.match(readme, /Git\/customer synchronization path remains trusted for signed-state freshness/);
+  assert.match(readme, /does not revoke older\s+ciphertext and wrapped keys retained in Git history/);
+  assert.match(readme, /encrypted-object, `\.enclist`, and server-policy readers/);
   assert.match(security, /stale or split view can delay revocation for future seals/);
+  assert.match(security, /persisted wrapped DEKs and DEKs already\s+released to clients do not acquire that session expiry/);
   assert.match(architecture, /inside Community's authorization-freshness\s+boundary/);
+  assert.match(architecture, /removed recipient who retains that private key can later\s+check out and decrypt an older commit/);
+  assert.match(architecture, /Credentials, sessions, or tokens expire independently/);
   assert.match(protocols, /silently ignore unknown object fields/);
   assert.match(protocols, /not fail-closed extensibility/);
 });

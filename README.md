@@ -1,9 +1,11 @@
 # RoleGit
 
 RoleGit adds cryptographic file permissions to Git repositories. In the target local-first design,
-GitHub collaborators can clone the same repository while protected files are decryptable only on
-devices authorized by a customer-controlled policy. The current prototype instead uses a
-customer-run authorization service that can unwrap data keys and is therefore decrypt-capable.
+GitHub collaborators can clone the same repository while each protected version is decryptable on
+devices authorized by a customer-controlled policy when that version is sealed. Removing a recipient
+prevents access to future versions only after sealers receive fresh policy; it does not revoke older
+ciphertext and wrapped keys retained in Git history. The current prototype instead uses a customer-run
+authorization service that can unwrap data keys and is therefore decrypt-capable.
 
 This is an early TypeScript 7 prototype. It includes encrypted vault objects, GitHub device-flow
 interfaces, server-side authorization, and fixed-duration sessions.
@@ -20,7 +22,9 @@ its Git/customer synchronization path remains trusted for signed-state freshness
 revocation under a stale or split view. Team distributes customer-signed metadata without receiving
 decryptable key material, although its coordinator has the analogous freshness boundary until the
 transparency protocol is specified. Enterprise key authority stays in customer-controlled devices,
-KMS, or self-hosted infrastructure.
+KMS, or self-hosted infrastructure. Across modes, revocation cannot recall plaintext or DEKs already
+released. Recipient-mode removal from retained encrypted history requires re-encryption and history
+rotation, and no mode can erase copies someone already made.
 Branch, protocol, and MIT repository governance are defined in
 [ADR 0002](docs/adr/0002-branches-protocols-and-repository-ownership.md).
 
@@ -198,8 +202,9 @@ active before removing it.
   numeric modes do not configure Windows ACLs; use a private Windows profile and appropriate ACLs.
   OS keychain storage is planned.
 - The authorization service binds to loopback; production TLS and deployment are not implemented.
-- Current v1 JSON readers reject unsupported versions and validate recognized fields but ignore
-  unknown object fields. This is a documented prototype exception, not a stable extensibility
+- Current v1 encrypted-object, `.enclist`, and server-policy readers reject unsupported versions and
+  validate recognized fields but ignore unknown object fields. This artifact-specific behavior is a
+  documented prototype exception, not a guarantee for every JSON response or a stable extensibility
   guarantee; producers must not encode security semantics in unknown fields. See
   [ADR 0002](docs/adr/0002-branches-protocols-and-repository-ownership.md).
 - There is no encrypted merge-conflict workflow yet.

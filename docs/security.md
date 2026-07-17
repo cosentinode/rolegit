@@ -10,13 +10,18 @@ snapshots. Community's Git/customer synchronization path and Team's coordinator 
 signed-metadata freshness until the transparency and consistency protocol defined by ADR 0001 is
 implemented; a stale or split view can delay revocation for future seals. Neither distribution path
 receives plaintext or decryption key material. This is separate from the decrypt-capable prototype
-boundary documented here.
+boundary documented here. A removed recipient can still decrypt an older Git object whose DEK was
+wrapped to that recipient; re-encrypting current content does not revoke copies retained in history.
 
 The prototype separates repository access from secret-decryption access. Git stores only encrypted
-vault objects. The customer-run authorization service holds the key-encryption key and releases
-short-lived data keys only after checking the current user's server-side access policy. Because that
-service can unwrap data keys, it is inside the confidentiality trust boundary and must be treated as
-decrypt-capable.
+vault objects. For each sealed version, the customer-run authorization service generates a fresh data
+key (DEK), returns the plaintext DEK after checking the current user's server-side access policy, and
+the client persists the wrapped DEK with the ciphertext. A later authorized unwrap returns that same
+DEK. Authorization sessions have a fixed duration, but persisted wrapped DEKs and DEKs already
+released to clients do not acquire that session expiry. Because the service holds the key-encryption
+key and can unwrap DEKs, it is inside the confidentiality trust boundary and must be treated as
+decrypt-capable. The client and service clear their immediate plaintext key buffers after use, but
+that does not impose a cryptographic key lifetime or erase other retained copies.
 
 ## Protected
 
@@ -30,6 +35,7 @@ decrypt-capable.
 
 - Secret filenames listed in `.enclist`, repository timing, or encrypted object sizes.
 - Data copied by someone while they were authorized.
+- Plaintext DEKs obtained during an authorized session; session expiry only blocks a later unwrap.
 - Plaintext retained by editors, processes, backups, swap, crash dumps, or malware.
 - Rollback to an older valid encrypted Git revision.
 - A compromised authorization service or key-encryption key.
