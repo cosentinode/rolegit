@@ -25,7 +25,7 @@ test("public docs preserve architecture, release, and parsing boundaries", async
   assert.match(architecture, /inside Community's authorization-freshness\s+boundary/);
   assert.match(architecture, /removed recipient who retains that private key can later\s+check out and decrypt an older commit/);
   assert.match(architecture, /Credentials, sessions, or tokens expire independently/);
-  const diagrams = architecture.match(/```mermaid\n[\s\S]*?\n```/g) ?? [];
+  const diagrams = architecture.match(/```mermaid\r?\n[\s\S]*?\r?\n```/g) ?? [];
   assert.equal(diagrams.length, 6);
   for (const diagram of diagrams) {
     assert.match(diagram, /\|seal:/);
