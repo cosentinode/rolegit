@@ -7,9 +7,17 @@ This is an early TypeScript 7 prototype. It includes encrypted vault objects, Gi
 interfaces, server-side authorization, and fixed-duration sessions.
 
 > [!WARNING]
-> The centralized authorization service is an experimental prototype for validating the current
-> security model. It is not production-ready and will be superseded by local-first Community mode.
-> See [`docs/security.md`](docs/security.md) and do not use this baseline with real secrets.
+> The centralized authorization service is an experimental, self-hosted-only prototype for validating
+> the current security model. It is not a public RoleGit SaaS offering, is not production-ready, and
+> will be superseded by local-first Community mode. See
+> [`docs/security.md`](docs/security.md) and do not use this baseline with real secrets.
+
+The target Community, Team, and Enterprise boundaries are defined in
+[ADR 0001](docs/adr/0001-product-modes-and-trust-boundaries.md). Community is local-first by default;
+Team coordinates metadata without receiving decryptable key material; Enterprise key authority stays
+in customer-controlled devices, KMS, or self-hosted infrastructure. Branch, protocol, and MIT
+repository governance are defined in
+[ADR 0002](docs/adr/0002-branches-protocols-and-repository-ownership.md).
 
 ## Requirements
 
@@ -46,9 +54,10 @@ rolegit protect .env
 ```
 
 `rolegit protect` refuses already tracked files and adds the plaintext path to `.gitignore`.
-Copy the generated vault ID and protected paths into an authorization-service policy based on
-[`server-policy.example.json`](server-policy.example.json). That server-side policy is the access
-authority; changing `.enclist` cannot grant decryption permission.
+For this experimental self-hosted prototype, copy the generated vault ID and protected paths into an
+authorization-service policy based on [`server-policy.example.json`](server-policy.example.json).
+That prototype server-side policy is the access authority; changing `.enclist` cannot grant decryption
+permission.
 
 ## Local End-to-End Development
 

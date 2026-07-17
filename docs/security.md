@@ -1,8 +1,15 @@
-# Security Model
+# Current Prototype Security Model
 
-RoleGit separates repository access from secret-decryption access. Git stores only encrypted
-vault objects. The authorization service holds the key-encryption key and releases short-lived
-data keys only after checking the current user's server-side access policy.
+This document covers the current v1 experimental, self-hosted-only prototype. It is not the target
+Community or Team architecture and is not offered as a public RoleGit SaaS service. The planned mode
+boundaries are defined in
+[ADR 0001](adr/0001-product-modes-and-trust-boundaries.md).
+
+The prototype separates repository access from secret-decryption access. Git stores only encrypted
+vault objects. The customer-run authorization service holds the key-encryption key and releases
+short-lived data keys only after checking the current user's server-side access policy. Because that
+service can unwrap data keys, it is inside the confidentiality trust boundary and must be treated as
+decrypt-capable.
 
 ## Protected
 
