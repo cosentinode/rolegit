@@ -1,13 +1,28 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+
+test("public docs preserve freshness and v1 extensibility boundaries", async () => {
+  const [readme, security, architecture, protocols] = await Promise.all([
+    readFile(path.join(projectRoot, "README.md"), "utf8"),
+    readFile(path.join(projectRoot, "docs/security.md"), "utf8"),
+    readFile(path.join(projectRoot, "docs/adr/0001-product-modes-and-trust-boundaries.md"), "utf8"),
+    readFile(path.join(projectRoot, "docs/adr/0002-branches-protocols-and-repository-ownership.md"), "utf8"),
+  ]);
+  assert.match(readme, /Git\/customer synchronization path remains trusted for signed-state freshness/);
+  assert.match(security, /stale or split view can delay revocation for future seals/);
+  assert.match(architecture, /inside Community's authorization-freshness\s+boundary/);
+  assert.match(protocols, /silently ignore unknown object fields/);
+  assert.match(protocols, /not fail-closed extensibility/);
+});
+
 test("package rebuild excludes stale output and includes required files", async (context) => {
-  const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
   const cleanRoot = await mkdtemp(path.join(tmpdir(), "rolegit-package-"));
   context.after(() => rm(cleanRoot, { recursive: true, force: true }));
   for (const entry of [

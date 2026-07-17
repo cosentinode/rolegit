@@ -29,10 +29,20 @@ implementation. The repository also needs a predictable path from development to
 Encrypted object formats, Git-tracked metadata schemas, coordination APIs, and KMS provider
 interfaces each carry an explicit version independent of the CLI/npm package version.
 
+The rules below govern future specified contracts and versions promoted as stable. The current v1
+encrypted-object, `.enclist`, and server-policy readers are a prototype exception: they require
+version 1 and validate recognized fields, but silently ignore unknown object fields, including unknown
+encrypted-object and wrapped-key fields. No published v1 schema marks those additions as safe. This
+behavior is not fail-closed extensibility, permission for producers to add fields, or a compatibility
+promise. v1 producers must not place security semantics in unknown fields, and consumers must not rely
+on those fields surviving a read/write cycle. Before a contract is declared stable, its schema must
+explicitly define safe additive fields or its readers must reject unknown fields.
+
 - An incompatible wire or persisted-format change increments that contract's major or format
   version and defines migration and downgrade behavior.
-- Additive fields are ignored only where the applicable schema explicitly marks that behavior safe.
-  Security-critical readers otherwise fail closed on unsupported versions or semantics.
+- In future specified contracts, additive fields are ignored only where the applicable schema
+  explicitly marks that behavior safe. Security-critical readers otherwise fail closed on unsupported
+  versions or semantics.
 - Patch-level clarifications cannot weaken authenticated context, key authority, or trust boundaries.
 - Released clients document the protocol versions they read and write. Compatibility is never inferred
   only from the RoleGit package version.
@@ -65,7 +75,9 @@ that customer deployments or separately distributed service implementations are 
 
 - Contributors target `develop`; release promotion to `main` is explicit and auditable.
 - Persisted and network contracts evolve independently from product packaging.
-- Security-sensitive unknown versions fail closed unless a specification proves safe extensibility.
+- Future specified contracts fail closed on unsupported versions or semantics unless their schema
+  proves safe extensibility; current permissive v1 unknown-field handling remains a documented
+  prototype exception, not stable protocol policy.
 - Open specifications and conformance assets remain sufficient for independent and self-hosted client
   implementations.
 - Hosting and commercial packaging may vary without changing public compatibility or confidentiality

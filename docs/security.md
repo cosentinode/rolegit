@@ -5,10 +5,12 @@ Community or Team architecture and is not offered as a public RoleGit SaaS servi
 boundaries are defined in
 [ADR 0001](adr/0001-product-modes-and-trust-boundaries.md).
 
-In the target Team mode, a customer-controlled policy root authorizes recipient snapshots and the
-RoleGit service receives no plaintext or decryption key material. That service remains trusted for
+In the target Community and Team modes, a customer-controlled policy root authorizes recipient
+snapshots. Community's Git/customer synchronization path and Team's coordinator remain trusted for
 signed-metadata freshness until the transparency and consistency protocol defined by ADR 0001 is
-implemented; this is separate from the decrypt-capable prototype boundary documented here.
+implemented; a stale or split view can delay revocation for future seals. Neither distribution path
+receives plaintext or decryption key material. This is separate from the decrypt-capable prototype
+boundary documented here.
 
 The prototype separates repository access from secret-decryption access. Git stores only encrypted
 vault objects. The customer-run authorization service holds the key-encryption key and releases
@@ -69,6 +71,12 @@ Version 1 uses AES-256-GCM with a fresh 96-bit nonce and fresh 256-bit data key 
 The authorization service wraps each data key under a 256-bit key-encryption key using a separate
 nonce and authenticated context. Complete files are buffered and limited to 10 MiB so no
 plaintext is emitted before authentication succeeds.
+
+Current v1 encrypted-object, `.enclist`, and server-policy readers reject unsupported versions and
+validate recognized fields, but ignore unknown JSON object fields. This is a prototype exception, not
+a safe-extensibility guarantee: producers must not encode security semantics in unknown fields, and
+consumers must not rely on unknown fields surviving a read/write cycle. Future stable protocol rules
+are defined in [ADR 0002](adr/0002-branches-protocols-and-repository-ownership.md).
 
 RoleGit uses Node's native `crypto` implementation. It does not implement cryptographic
 primitives itself.

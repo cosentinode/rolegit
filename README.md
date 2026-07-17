@@ -16,9 +16,11 @@ interfaces, server-side authorization, and fixed-duration sessions.
 
 The target Community, Team, and Enterprise boundaries are defined in
 [ADR 0001](docs/adr/0001-product-modes-and-trust-boundaries.md). Community is local-first by default;
-Team distributes customer-signed metadata without receiving decryptable key material, although
-metadata freshness remains in its trust boundary until the transparency protocol is specified;
-Enterprise key authority stays in customer-controlled devices, KMS, or self-hosted infrastructure.
+its Git/customer synchronization path remains trusted for signed-state freshness and can delay
+revocation under a stale or split view. Team distributes customer-signed metadata without receiving
+decryptable key material, although its coordinator has the analogous freshness boundary until the
+transparency protocol is specified. Enterprise key authority stays in customer-controlled devices,
+KMS, or self-hosted infrastructure.
 Branch, protocol, and MIT repository governance are defined in
 [ADR 0002](docs/adr/0002-branches-protocols-and-repository-ownership.md).
 
@@ -196,4 +198,8 @@ active before removing it.
   numeric modes do not configure Windows ACLs; use a private Windows profile and appropriate ACLs.
   OS keychain storage is planned.
 - The authorization service binds to loopback; production TLS and deployment are not implemented.
+- Current v1 JSON readers reject unsupported versions and validate recognized fields but ignore
+  unknown object fields. This is a documented prototype exception, not a stable extensibility
+  guarantee; producers must not encode security semantics in unknown fields. See
+  [ADR 0002](docs/adr/0002-branches-protocols-and-repository-ownership.md).
 - There is no encrypted merge-conflict workflow yet.

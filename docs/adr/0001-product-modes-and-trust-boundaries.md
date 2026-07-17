@@ -29,12 +29,12 @@ Community is the default architecture and performs encryption and decryption on 
 devices. Team adds optional metadata-only coordination without entering the key-custody boundary.
 Enterprise adds customer-controlled KMS and self-hosted choices. A RoleGit-operated Team service is
 never a policy or decryption-key authority and does not receive the material needed to decrypt files;
-it remains part of the authorization-freshness boundary until a global transparency and consistency
-protocol is specified.
+Community's Git/customer synchronization path and Team's coordinator remain part of their respective
+authorization-freshness boundaries until a global transparency and consistency protocol is specified.
 
 | Mode | Key authority | Confidentiality trust boundary | Actors able to decrypt protected files |
 | --- | --- | --- | --- |
-| Community local-first | A customer-controlled repository policy root authorizes policy-signing keys and recipient snapshots; recipient and recovery private keys unwrap DEKs | Customer policy-signing authority and authorized devices; Git remains outside key custody | Authorized recipient or recovery devices only |
+| Community local-first | A customer-controlled repository policy root authorizes policy-signing keys and recipient snapshots; recipient and recovery private keys unwrap DEKs | Customer policy-signing authority and authorized devices; Git/customer synchronization remains outside key custody but is trusted for signed-state freshness until global consistency is specified | Authorized recipient or recovery devices only |
 | Team zero-knowledge coordination | The same customer-controlled policy root and recipient private keys as Community; Team membership results are inputs, not authority | Customer policy-signing authority and authorized devices; Team remains outside key custody but is trusted for availability and freshness of signed metadata until transparency is specified | Authorized recipient or recovery devices only; RoleGit Cloud has no decryption key material |
 | Enterprise customer KMS | The customer's KMS policy and keys | Authorized clients plus the customer KMS security boundary | Authorized clients; the customer KMS is treated as decrypt-capable because it can unwrap DEKs |
 | Enterprise content-blind self-hosted | The customer-controlled policy root and recipient private keys | Customer policy-signing authority and authorized devices; the customer-hosted coordinator has the same freshness limitation as Team | Authorized recipient or recovery devices only |
@@ -62,30 +62,39 @@ and fail closed on a lower sequence, a different digest at an already observed s
 predecessor. The validated recipient snapshot exclusively determines which public keys receive the
 new DEK.
 
-These checks prevent the coordinator from forging recipients and detect rollback or equivocation a
-client has observed, but they do not prove that every client has the globally latest signed state. A
-coordinator can withhold an update or replay a still-valid state to an isolated or newly enrolled
-device, potentially delaying revocation for future seals. Until a versioned transparency and
-freshness protocol closes that gap, Team is outside the decryption-key boundary but remains trusted
-for this authorization-freshness property. The service still cannot decrypt by itself.
+These checks prevent a distribution service from forging recipients and detect rollback or
+equivocation a client has observed, but they do not prove that every client has the globally latest
+signed state. A stale or offline sealing device can therefore use a still-valid pre-revocation
+snapshot and wrap a new DEK to a revoked recipient.
+
+In Community, a Git split view, stale mirror, or delayed customer synchronization can withhold a
+newer signed state and cause that delayed-revocation outcome. Git and the customer-controlled
+synchronization path are therefore outside key custody but inside Community's authorization-freshness
+boundary. In Team, the coordinator can similarly withhold an update or replay a still-valid state to
+an isolated or newly enrolled device. Until a versioned transparency and freshness protocol closes
+these gaps, neither mode has a global latest-state guarantee. A Git host or Team service still cannot
+decrypt by itself.
 
 ### Community Local-First
 
 Community requires no RoleGit service for normal protect, seal, unlock, or lock operations. Git stores
 ciphertext and public recipient information. Private device and recovery keys stay in local or
-customer-controlled custody.
+customer-controlled custody. Clients authenticate state with the customer policy root, but Git and
+the customer's synchronization path remain trusted to deliver fresh, globally consistent state.
 
 ```mermaid
 flowchart LR
-    R[Customer policy root] -->|signed policy and recipient snapshot| A[Authorized sealing device: decrypt-capable]
+    R[Customer policy root] -->|signed policy and recipient snapshot| G[Git host: cannot decrypt]
+    G -->|signed public state| A[Authorized sealing device: decrypt-capable]
     O[Existing device or customer recovery] -->|authenticated root and checkpoint bootstrap| A
-    A -->|verify state, encrypt locally, and wrap DEK to recipients| G[Git host: cannot decrypt]
+    A -->|verify state, encrypt locally, and wrap DEK to recipients| G
     G -->|clone or pull encrypted object| B[Authorized recipient device: decrypt-capable]
     B -->|private key unwrap and local decrypt| P[Plaintext on authorized device]
     C[RoleGit Cloud: cannot decrypt; absent from content and key paths]
 ```
 
-The authorized recipient device can decrypt. The Git host and RoleGit Cloud cannot.
+The authorized recipient device can decrypt. The Git host and RoleGit Cloud cannot, but a stale or
+split Git view can delay revocation for a future seal as described above.
 
 ### Team Zero-Knowledge Coordination
 
@@ -191,6 +200,8 @@ RoleGit-operated Cloud service is part of this prototype deployment.
 ## Consequences
 
 - Community confidentiality does not depend on RoleGit service availability.
+- Community depends on Git/customer synchronization for signed-state freshness; stale or split views
+  can delay recipient revocation for future seals even though Git has no decryption key material.
 - Team can improve coordination but cannot perform server-side plaintext processing or key recovery;
   it remains trusted for signed-metadata freshness until the transparency protocol is specified.
 - Enterprise customers that select KMS or key-broker modes intentionally expand the decrypt-capable
