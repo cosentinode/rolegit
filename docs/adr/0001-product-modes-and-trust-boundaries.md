@@ -35,10 +35,10 @@ protocol is specified.
 
 | Mode | Key authority | Confidentiality trust boundary | Actors able to decrypt protected files |
 | --- | --- | --- | --- |
-| Community local-first | A customer-controlled repository policy root authorizes policy-signing keys and recipient snapshots; recipient and recovery private keys unwrap DEKs | Customer policy-signing authority and authorized devices; Git/customer synchronization remains outside key custody but is trusted for signed-state freshness until global consistency is specified | Devices whose recipient or recovery key was authorized when that protected version was sealed, including retained historical versions |
-| Team zero-knowledge coordination | The same customer-controlled policy root and recipient private keys as Community; Team membership results are inputs, not authority | Customer policy-signing authority and authorized devices; Team remains outside key custody but is trusted for availability and freshness of signed metadata until transparency is specified | Devices whose recipient or recovery key was authorized when that protected version was sealed; RoleGit Cloud has no decryption key material |
+| Community local-first | A customer-controlled repository policy root authorizes policy-signing keys and recipient snapshots; recipient and recovery private keys unwrap DEKs | Customer policy-signing authority and authorized devices; Git/customer synchronization remains outside key custody but is trusted for signed-state freshness until global consistency is specified | Devices whose recipient or recovery key was authorized when that protected version was sealed, and authorized sealing devices that generated or otherwise obtained and retained its plaintext DEK |
+| Team zero-knowledge coordination | The same customer-controlled policy root and recipient private keys as Community; Team membership results are inputs, not authority | Customer policy-signing authority and authorized devices; Team remains outside key custody but is trusted for availability and freshness of signed metadata until transparency is specified | Devices whose recipient or recovery key was authorized when that protected version was sealed, and authorized sealing devices that generated or otherwise obtained and retained its plaintext DEK; RoleGit Cloud has no decryption key material |
 | Enterprise customer key provider | The customer's provider policy and wrapping/unwrap keys | Authorized clients and client-side agents plus the customer-controlled provider/provider-side-agent security boundary | Clients and client-side agents currently authorized to unwrap or that generated or otherwise obtained and retained a DEK; the provider-side boundary is treated as decrypt-capable because it controls unwrap |
-| Enterprise content-blind self-hosted | The customer-controlled policy root and recipient private keys | Customer policy-signing authority and authorized devices; the customer-hosted coordinator has the same freshness limitation as Team | Devices whose recipient or recovery key was authorized when that protected version was sealed, including retained historical versions |
+| Enterprise content-blind self-hosted | The customer-controlled policy root and recipient private keys | Customer policy-signing authority and authorized devices; the customer-hosted coordinator has the same freshness limitation as Team | Devices whose recipient or recovery key was authorized when that protected version was sealed, and authorized sealing devices that generated or otherwise obtained and retained its plaintext DEK |
 | Enterprise key-broker self-hosted | The customer's self-hosted broker and KMS/KEK | Authorized clients plus the entire customer-operated broker and KMS boundary | Clients currently authorized to unwrap or retaining a previously released DEK, and the customer-controlled key boundary; no RoleGit-operated service |
 
 Specific object schemas, algorithms, signature encodings, and key-provider APIs belong in versioned protocol
@@ -81,9 +81,11 @@ decrypt by itself.
 Recipient snapshots authorize new seals; they do not revoke ciphertext already created. In Community,
 Team, and the Enterprise content-blind profile, Git retains each encrypted object and its DEK wrapped
 to the recipients authorized at seal time. A removed recipient who retains that private key can later
-check out and decrypt an older commit. Publishing a new snapshot or re-sealing the current version
-with a fresh DEK excludes the recipient from that new version, subject to the freshness limitation
-above, but does not change retained history.
+check out and decrypt an older commit. An authorized sealing device can also decrypt any version whose
+plaintext DEK it generated or otherwise obtained and retained, independently of whether it holds a
+recipient or recovery private key. Publishing a new snapshot or re-sealing the current version with a
+fresh DEK excludes the recipient from that new version, subject to the freshness limitation above,
+but does not revoke a DEK retained by its sealer or change retained history.
 
 In Enterprise key-provider and key-broker modes, and in the centralized prototype, authorization
 gates DEK generation, wrap, or unwrap requests. Credentials, sessions, or tokens expire independently;
@@ -123,9 +125,11 @@ flowchart LR
     C[RoleGit Cloud: cannot decrypt; absent from content and key paths]
 ```
 
-Devices authorized for an object's seal can decrypt that object, including from retained history
-after their later removal. The Git host and RoleGit Cloud cannot, but a stale or split Git view can
-also delay revocation for a future seal as described above.
+Authorized recipient and recovery-key devices can decrypt objects sealed to their keys, including
+from retained history after their later removal. An authorized sealing device can also decrypt an
+object when it generated or otherwise obtained and retained the plaintext DEK. The Git host and
+RoleGit Cloud cannot, but a stale or split Git view can also delay revocation for a future seal as
+described above.
 
 ### Team Zero-Knowledge Coordination
 
@@ -147,11 +151,12 @@ flowchart LR
     H -->|unlock: unwrap plaintext DEK with recovery private key and decrypt locally| P
 ```
 
-Only a device holding an authorized recipient or recovery private key can directly decrypt. RoleGit
-Team, other RoleGit Cloud components, and the Git host receive no decryption key material. Team's
-remaining metadata-freshness trust and delayed-revocation risk are defined above rather than hidden by
-an unconditional confidentiality claim. Recipient removal is not retroactive for objects retained in
-Git history.
+A device holding an authorized recipient or recovery private key can directly decrypt, as can an
+authorized sealing device that generated or otherwise obtained and retained the plaintext DEK.
+RoleGit Team, other RoleGit Cloud components, and the Git host receive no decryption key material.
+Team's remaining metadata-freshness trust and delayed-revocation risk are defined above rather than
+hidden by an unconditional confidentiality claim. Recipient removal is not retroactive for objects
+retained in Git history and cannot recall a DEK retained by a sealing device.
 
 ### Enterprise Customer Key Provider
 
@@ -240,9 +245,11 @@ flowchart LR
     R[RoleGit Cloud: absent from deployment and key path]
 ```
 
-In the content-blind profile, devices authorized when an object was sealed can decrypt it even after
-later removal, subject also to the documented signed-metadata freshness boundary for future seals. In
-the key-broker profile, currently authorized devices, devices retaining a released DEK, and the
+In the content-blind profile, recipient and recovery-key devices authorized when an object was sealed
+can decrypt it even after later removal, subject also to the documented signed-metadata freshness
+boundary for future seals. An authorized sealing device can independently decrypt when it generated
+or otherwise obtained and retained the plaintext DEK, which recipient removal cannot recall. In the
+key-broker profile, currently authorized devices, devices retaining a released DEK, and the
 customer-controlled broker/KMS boundary are decrypt-capable; broker revocation cannot recall released
 material. RoleGit Cloud receives no decryption key material in either profile.
 

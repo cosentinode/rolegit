@@ -27,6 +27,7 @@ test("public docs preserve architecture, release, and parsing boundaries", async
   assert.match(security, /legitimate service policy controls only requests that\s+reach it and is not the sole authority for future seals/);
   assert.match(architecture, /inside Community's authorization-freshness\s+boundary/);
   assert.match(architecture, /removed recipient who retains that private key can later\s+check out and decrypt an older commit/);
+  assert.match(architecture, /An authorized sealing device can also decrypt any version whose\s+plaintext DEK it generated or otherwise obtained and retained/);
   assert.match(architecture, /Credentials, sessions, or tokens expire independently/);
   assert.match(architecture, /legitimate server policy is therefore not the sole authority for future seals/);
   assert.match(architecture, /endpoint replacement alone does not reveal objects\s+previously sealed through the expected service/);
@@ -44,6 +45,7 @@ test("public docs preserve architecture, release, and parsing boundaries", async
   ]) {
     const recipientDiagram = diagrams.find((diagram) => diagram.includes(recipientDiagramMarker));
     assert.ok(recipientDiagram);
+    assert.match(recipientDiagram, /Authorized(?: customer)? sealing device: plaintext-DEK holder and decrypt-capable/);
     assert.match(recipientDiagram, /Authorized recovery-key holder: plaintext-DEK holder and decrypt-capable/);
     assert.match(recipientDiagram, /unlock: unwrap plaintext DEK with recovery private key and decrypt locally/);
   }
@@ -95,8 +97,11 @@ test("package rebuild excludes stale output and includes required files", async 
     cwd: cleanRoot,
     encoding: "utf8",
   });
-  const result = JSON.parse(output) as Array<{ files: Array<{ path: string }> }>;
-  const files = result[0]!.files.map((file) => file.path);
+  type PackResult = { files: Array<{ path: string }> };
+  const parsed = JSON.parse(output) as PackResult[] | Record<string, PackResult>;
+  const results = Array.isArray(parsed) ? parsed : Object.values(parsed);
+  assert.equal(results.length, 1, "npm pack should describe exactly one package");
+  const files = results[0]!.files.map((file) => file.path);
   assert.ok(files.includes("dist/src/cli.js"));
   for (const documentation of [
     "README.md",
