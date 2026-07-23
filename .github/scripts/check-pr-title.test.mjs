@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-const checker = fileURLToPath(new URL("check-pr-title.mjs", import.meta.url));
-
 function check(title) {
-  return spawnSync(process.execPath, [checker], {
+  const npm = process.platform === "win32" ? (process.env.ComSpec ?? "cmd.exe") : "npm";
+  const args = process.platform === "win32"
+    ? ["/d", "/s", "/c", "npm", "run", "lint:commit"]
+    : ["run", "lint:commit"];
+  return spawnSync(npm, args, {
     encoding: "utf8",
-    env: { ...process.env, PR_TITLE: title },
+    input: `${title}\n`,
   });
 }
 
@@ -17,6 +18,8 @@ test("accepts Conventional Commits titles", () => {
     "fix: handle missing configuration",
     "feat(cli): add login command",
     "refactor!: remove legacy format",
+    "chore(release): v1.2.3",
+    "revert: unsafe change",
   ]) {
     assert.equal(check(title).status, 0, title);
   }
@@ -26,10 +29,20 @@ test("rejects non-Conventional Commits titles", () => {
   for (const title of [
     "Add login command",
     "feature: add login command",
+    "fix(): handle missing configuration",
+    "fix( ): handle missing configuration",
+    "fix( cli): handle missing configuration",
+    "fix(cli ): handle missing configuration",
+    "fix:  handle missing configuration",
+    "fix: handle missing configuration ",
+    " fix: handle missing configuration",
     "fix: ",
+    "Merge pull request #123 from owner/branch",
+    "v1.2.3",
+    'Revert "unsafe change"',
   ]) {
     const result = check(title);
     assert.equal(result.status, 1, title);
-    assert.match(result.stderr, /Invalid PR title/);
+    assert.match(`${result.stdout}${result.stderr}`, /found \d+ problems?/);
   }
 });

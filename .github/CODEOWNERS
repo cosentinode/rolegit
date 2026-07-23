@@ -1,0 +1,18 @@
+# Default ownership for every tracked path.
+* @cosentinode
+
+# Repository governance and supply-chain configuration.
+/.github/ @cosentinode
+/package.json @cosentinode
+/package-lock.json @cosentinode
+
+# Security model, protocol contracts, and security-critical implementation.
+/docs/security.md @cosentinode
+/docs/adr/ @cosentinode
+/server-policy.example.json @cosentinode
+/src/auth-client.ts @cosentinode
+/src/auth-server.ts @cosentinode
+/src/crypto.ts @cosentinode
+/src/files.ts @cosentinode
+/src/policy.ts @cosentinode
+/src/session.ts @cosentinode

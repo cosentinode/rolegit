@@ -18,6 +18,7 @@
   "scripts": {
     "build": "tsc",
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "lint:commit": "commitlint",
     "typecheck": "tsc --noEmit",
     "prepack": "npm run clean && npm run build",
     "package:check": "npm pack --dry-run",
@@ -30,6 +31,8 @@
     "node": ">=22"
   },
   "devDependencies": {
+    "@commitlint/cli": "^20.5.3",
+    "@commitlint/config-conventional": "^20.5.3",
     "@types/node": "^24.0.0",
     "typescript": "^7.0.2"
   },
