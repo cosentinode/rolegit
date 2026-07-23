@@ -355,42 +355,43 @@ test("workflow output does not expose secret canaries", async (context) => {
   await command(["login", "--development-user", "101"]);
   tokens.push((await loadSession(root, authServer)).token);
   await command(["seal"]);
-  await command(["lock"]);
-  await rm(path.join(root, ".env"));
-  await command(["login", "--development-user", "101"]);
-  const unlockSession = await loadSession(root, authServer);
-  tokens.push(unlockSession.token);
-  await saveSession(root, { ...unlockSession, expiresAt: new Date(Date.now() + 8_000).toISOString() });
-  await command(["unlock"]);
-  assert.equal(await readFile(path.join(root, ".env"), "utf8"), `${plaintextCanary}=value\n`);
-
-  const existingDestination = await command(["unlock"], 1);
-  assert.match(existingDestination.stderr, /destination already exists/);
-  await command(["lock"]);
-  await command(["login", "--development-user", "101"]);
-  tokens.push((await loadSession(root, authServer)).token);
   serverPolicy.vaults[enclist.vaultId]!.files[".env"] = { users: [], teams: [] };
-  const deniedByServer = await command(["unlock"], 1);
+  const deniedByServer = await command(["seal"], 1);
   assert.match(deniedByServer.stderr, /user is not authorized for this file/);
-
-  await command(["lock"]);
   serverPolicy.vaults[enclist.vaultId]!.files[".env"] = { users: [101], teams: [] };
-  await command(["login", "--development-user", "101"]);
-  const expiringSession = await loadSession(root, authServer);
-  tokens.push(expiringSession.token);
-  await saveSession(root, { ...expiringSession, expiresAt: new Date(Date.now() + 1_500).toISOString() });
-  await command(["unlock"]);
-  const expiryDeadline = Date.now() + 8_000;
-  while (Date.now() < expiryDeadline) {
-    try {
-      await stat(path.join(root, ".env"));
-      await delay(100);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") break;
-      throw error;
+  await command(["lock"]);
+
+  // GitHub Actions keeps detached processes in its Windows job object. Ubuntu covers the packaged
+  // unlock watcher; Windows still covers packaged command output and a rendered server denial above.
+  if (process.platform !== "win32") {
+    await rm(path.join(root, ".env"));
+    await command(["login", "--development-user", "101"]);
+    const unlockSession = await loadSession(root, authServer);
+    tokens.push(unlockSession.token);
+    await saveSession(root, { ...unlockSession, expiresAt: new Date(Date.now() + 8_000).toISOString() });
+    await command(["unlock"]);
+    assert.equal(await readFile(path.join(root, ".env"), "utf8"), `${plaintextCanary}=value\n`);
+
+    const existingDestination = await command(["unlock"], 1);
+    assert.match(existingDestination.stderr, /destination already exists/);
+    await command(["lock"]);
+    await command(["login", "--development-user", "101"]);
+    const expiringSession = await loadSession(root, authServer);
+    tokens.push(expiringSession.token);
+    await saveSession(root, { ...expiringSession, expiresAt: new Date(Date.now() + 1_500).toISOString() });
+    await command(["unlock"]);
+    const expiryDeadline = Date.now() + 8_000;
+    while (Date.now() < expiryDeadline) {
+      try {
+        await stat(path.join(root, ".env"));
+        await delay(100);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") break;
+        throw error;
+      }
     }
+    await assert.rejects(() => stat(path.join(root, ".env")), { code: "ENOENT" });
   }
-  await assert.rejects(() => stat(path.join(root, ".env")), { code: "ENOENT" });
 
   const renderedOutput = output.join("\n");
   assert.doesNotMatch(renderedOutput, new RegExp(plaintextCanary));
