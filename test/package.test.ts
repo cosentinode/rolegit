@@ -31,11 +31,12 @@ test("public docs preserve architecture, release, and parsing boundaries", async
   assert.match(architecture, /inside Community's authorization-freshness\s+boundary/);
   assert.match(architecture, /removed recipient who retains that private key can later\s+check out and decrypt an older commit/);
   assert.match(architecture, /A sealing device can also decrypt any version whose\s+plaintext DEK it generated or otherwise obtained and retained/);
-  assert.match(architecture, /Credentials, sessions, or tokens expire independently/);
+  assert.match(architecture, /Credentials, sessions, or tokens\s+expire\s+independently/);
   assert.match(architecture, /legitimate server policy is therefore not the sole authority for future seals/);
   assert.match(architecture, /endpoint replacement alone does not reveal objects\s+previously sealed through the expected service/);
   assert.match(architecture, /policy root authorizes recipient state; it does not currently authorize sealing identities/);
-  assert.match(architecture, /no local-first mode may claim cryptographically\s+authenticated sealer provenance/);
+  assert.match(architecture, /authenticating an Enterprise B2 provider public wrapping key proves which provider can unwrap a DEK/);
+  assert.match(architecture, /neither recipient modes nor B2 local wrap may claim\s+cryptographically authenticated sealer provenance/);
   const diagrams = architecture.match(/```mermaid\r?\n[\s\S]*?\r?\n```/g) ?? [];
   assert.equal(diagrams.length, 6);
   for (const diagram of diagrams) {
@@ -64,6 +65,8 @@ test("public docs preserve architecture, release, and parsing boundaries", async
   assert.match(keyProviderDiagram, /seal B1: send client-generated plaintext DEK and context for remote wrap/);
   assert.match(keyProviderDiagram, /seal B1: return wrapped DEK only/);
   assert.match(keyProviderDiagram, /seal B2: authenticated public wrapping key for local wrap; no plaintext DEK received/);
+  assert.match(keyProviderDiagram, /Repository writer or Git split view with B2 public wrapping key/);
+  assert.match(keyProviderDiagram, /can forge a locally wrapped replacement; cannot recover displaced plaintext/);
   assert.match(keyProviderDiagram, /unlock: return plaintext DEK after authorization/);
   assert.match(architecture, /provider\s+contract requires wrap and unwrap without assuming a\s+provider-specific data-key-generation API/);
   assert.match(architecture, /client-side agent\s+runs in the authorized client boundary/);
@@ -71,7 +74,9 @@ test("public docs preserve architecture, release, and parsing boundaries", async
   assert.match(architecture, /Provider-generated and remote-wrap sealing place plaintext DEKs inside the provider\/provider-side-agent\s+boundary/);
   assert.match(architecture, /client-side local public-key wrapping does not do so during sealing/);
   assert.match(architecture, /local-wrap variant, it can decrypt immediately after generating the DEK without an unwrap authorization/);
-  assert.match(architecture, /provider revocation cannot affect a client-generated DEK while the client or\s+client-side agent holds or retains it/);
+  assert.match(architecture, /unwrap authorization does not establish who sealed\s+the object/);
+  assert.match(architecture, /provider policy authorizes requests it receives, while possession of a B2 public wrapping key permits local sealing but does not authorize the sealer or content/);
+  assert.match(architecture, /provider revocation cannot affect a client-generated DEK\s+while the client or client-side agent holds or retains it/);
   assert.match(protocols, /silently ignore unknown object fields/);
   assert.match(protocols, /not fail-closed extensibility/);
   assert.match(protocols, /`develop` is the integration branch and the base for feature and maintenance pull requests/);

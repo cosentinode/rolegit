@@ -31,14 +31,14 @@ Enterprise adds customer-controlled key-provider and self-hosted choices. A Role
 service is never a policy or decryption-key authority and does not receive the material needed to
 decrypt files; Community's Git/customer synchronization path and Team's coordinator remain part of
 their respective authorization-freshness boundaries until a global transparency and consistency
-protocol is specified. Recipient-mode content authenticity also remains in the repository write and
-Git provenance boundary until a sealer-authentication protocol is specified.
+protocol is specified. Recipient-mode and Enterprise local-wrap content authenticity also remains in
+the repository write and Git provenance boundary until a sealer-authentication protocol is specified.
 
 | Mode | Key authority | Confidentiality trust boundary | Actors able to decrypt protected files |
 | --- | --- | --- | --- |
 | Community local-first | A customer-controlled repository policy root authorizes policy-signing keys and recipient snapshots; recipient and recovery private keys unwrap DEKs | Customer policy-signing authority and authorized devices; Git/customer synchronization remains outside key custody but is trusted for signed-state freshness until global consistency is specified | Devices whose recipient or recovery key was authorized when that protected version was sealed, and sealing devices that generated or otherwise obtained and retained its plaintext DEK |
 | Team zero-knowledge coordination | The same customer-controlled policy root and recipient private keys as Community; Team membership results are inputs, not authority | Customer policy-signing authority and authorized devices; Team remains outside key custody but is trusted for availability and freshness of signed metadata until transparency is specified | Devices whose recipient or recovery key was authorized when that protected version was sealed, and sealing devices that generated or otherwise obtained and retained its plaintext DEK; RoleGit Cloud has no decryption key material |
-| Enterprise customer key provider | The customer's provider policy and wrapping/unwrap keys | Authorized clients and client-side agents plus the customer-controlled provider/provider-side-agent security boundary | Clients and client-side agents currently authorized to unwrap or that generated or otherwise obtained and retained a DEK; the provider-side boundary is treated as decrypt-capable because it controls unwrap |
+| Enterprise customer key provider | The customer's provider policy and wrapping/unwrap keys; provider policy authorizes requests it receives, while possession of a B2 public wrapping key permits local sealing but does not authorize the sealer or content | Authorized clients and client-side agents plus the customer-controlled provider/provider-side-agent security boundary | Clients and client-side agents currently authorized to unwrap or that generated or otherwise obtained and retained a DEK; the provider-side boundary is treated as decrypt-capable because it controls unwrap |
 | Enterprise content-blind self-hosted | The customer-controlled policy root and recipient private keys | Customer policy-signing authority and authorized devices; the customer-hosted coordinator has the same freshness limitation as Team | Devices whose recipient or recovery key was authorized when that protected version was sealed, and sealing devices that generated or otherwise obtained and retained its plaintext DEK |
 | Enterprise key-broker self-hosted | The customer's self-hosted broker and KMS/KEK | Authorized clients plus the entire customer-operated broker and KMS boundary | Clients currently authorized to unwrap or retaining a previously released DEK, and the customer-controlled key boundary; no RoleGit-operated service |
 
@@ -80,20 +80,25 @@ decrypt by itself.
 ### Content Authenticity and Sealer Authority
 
 The policy root authorizes recipient state; it does not currently authorize sealing identities, and
-the target recipient format does not yet specify a sealer signature that recipients verify. AEAD
-authentication detects modification of an object without its DEK, but it does not prove who created a
-new, internally valid object. A repository writer or Git host presenting a split view can choose a new
-DEK, encrypt attacker-chosen plaintext, wrap that DEK to valid recipients from a signed snapshot, and
+the target recipient format does not yet specify a sealer signature that recipients verify. Likewise,
+authenticating an Enterprise B2 provider public wrapping key proves which provider can unwrap a DEK;
+it does not authenticate the actor that sealed the object, and a public key is not a sealing-authorization
+secret. AEAD authentication detects modification of an object without its DEK, but it does not prove
+who created a new, internally valid object. A repository writer or Git host presenting a split view can
+choose a new DEK, encrypt attacker-chosen plaintext, wrap that DEK to valid recipients from a signed
+snapshot or locally with an obtained B2 public wrapping key and the bound repository/path context, and
 substitute the resulting decryptable object. That actor still cannot recover the displaced customer
-plaintext, but can forge replacement content.
+plaintext, but can forge replacement content that an authorized client can submit for unwrap.
 
-Community, Team, and Enterprise content-blind recipients therefore trust repository write controls,
-review, and Git provenance for content authenticity. "Sealing device" in this ADR identifies an actor
-that performs sealing and may retain its DEK; it does not mean the customer policy cryptographically
-authorized that actor. A future versioned format may move this boundary by defining sealer keys,
-policy authorization, object signatures, and mandatory recipient verification. Until then, the
-diagrams show the trusted write path explicitly and no local-first mode may claim cryptographically
-authenticated sealer provenance.
+Community, Team, Enterprise content-blind recipients, and Enterprise B2 local-wrap recipients therefore
+trust repository write controls, review, and Git provenance for content authenticity. "Sealing device"
+in this ADR identifies an actor that performs sealing and may retain its DEK; it does not mean the
+customer policy cryptographically authorized that actor. A future versioned format may move this
+boundary by defining sealer keys, policy authorization, object signatures, and mandatory recipient
+verification. A future B2 provider contract could instead require authenticated sealer authorization
+and object registration that is enforced at unwrap. Until one of those contracts is specified, the
+diagrams show the trusted write path explicitly and neither recipient modes nor B2 local wrap may claim
+cryptographically authenticated sealer provenance.
 
 ### Revocation and Retained History
 
@@ -106,13 +111,14 @@ recipient or recovery private key. Publishing a new snapshot or re-sealing the c
 fresh DEK excludes the recipient from that new version, subject to the freshness limitation above,
 but does not revoke a DEK retained by its sealer or change retained history.
 
-In Enterprise key-provider and key-broker modes, and in the centralized prototype, authorization
-gates DEK generation, wrap, or unwrap requests. Credentials, sessions, or tokens expire independently;
-they do not set a cryptographic expiry on a generated DEK. Revocation can deny a later unwrap, but
-cannot recall a DEK or plaintext already generated or obtained by a client. In the key-provider
-local-wrap variant, provider revocation cannot affect a client-generated DEK while the client or
-client-side agent holds or retains it; provider policy controls only a later unwrap. Merely re-wrapping
-or re-encrypting the current version also leaves older ciphertext and wrapped DEKs in Git. Unlike
+In Enterprise key-provider and key-broker modes, and in the centralized prototype, authorization gates
+DEK generation, wrap, or unwrap requests that reach the provider. Credentials, sessions, or tokens expire
+independently; they do not set a cryptographic expiry on a generated DEK. Revocation can deny a later
+unwrap, but cannot recall a DEK or plaintext already generated or obtained by a client. B2 local wrap
+makes no provider request while sealing, so provider revocation cannot affect a client-generated DEK
+while the client or client-side agent holds or retains it; provider policy controls only a later unwrap.
+Merely re-wrapping or re-encrypting the current version also leaves older ciphertext and wrapped DEKs
+in Git. Unlike
 recipient removal, service-side policy revocation can deny future unwraps of both current and
 historical objects, provided the actor did not generate or otherwise obtain and retain the material.
 
@@ -210,6 +216,7 @@ flowchart LR
     K -->|seal B1: return wrapped DEK only| D
     K -.->|seal B2: authenticated public wrapping key for local wrap; no plaintext DEK received| D
     D -->|seal: encrypt locally; store ciphertext and wrapped DEK| G[Git host: cannot decrypt]
+    W[Repository writer or Git split view with B2 public wrapping key] -->|can forge a locally wrapped replacement; cannot recover displaced plaintext| G
     G -->|unlock: encrypted object and wrapped DEK| D
     D -->|unlock: request unwrap with wrapped DEK and authenticated context| K
     K -->|unlock: return plaintext DEK after authorization| D
@@ -219,7 +226,9 @@ flowchart LR
 
 The authorized client or client-side agent can decrypt whenever it holds the plaintext DEK. In the B2
 local-wrap variant, it can decrypt immediately after generating the DEK without an unwrap authorization;
-other unlocks require provider authorization.
+other unlocks require provider authorization. That unwrap authorization does not establish who sealed
+the object: absent authenticated sealer authorization and provider-enforced object registration, a
+repository writer that obtains the public wrapping key can construct a replacement that reaches unwrap.
 Provider-generated and remote-wrap sealing place plaintext DEKs inside the provider/provider-side-agent
 boundary; client-side local public-key wrapping does not do so during sealing. The provider-side
 boundary is nevertheless always treated as decrypt-capable because it controls unwrap. RoleGit Cloud
@@ -348,8 +357,9 @@ service and thereby compromise confidentiality and authenticity of future seals.
   erase retained copies.
 - Team can improve coordination but cannot perform server-side plaintext processing or key recovery;
   it remains trusted for signed-metadata freshness until the transparency protocol is specified.
-- Recipient-mode policy authorizes recipients, not sealers; without specified sealer signatures,
-  recipients trust repository write controls and Git provenance against forged replacement content.
+- Recipient-mode policy authorizes recipients, not sealers, and a B2 public wrapping key authenticates
+  the unwrap provider, not the sealer; without specified sealer authentication, recipients trust
+  repository write controls and Git provenance against forged replacement content.
 - Enterprise customers that select key-provider or key-broker modes intentionally expand the decrypt-capable
   boundary to customer-controlled infrastructure.
 - The centralized prototype's tracked service endpoint is inside its bootstrap and confidentiality
