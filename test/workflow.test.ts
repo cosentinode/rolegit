@@ -77,8 +77,18 @@ async function runCli(
   child.stdout.on("data", (chunk: string) => { stdout += chunk; });
   child.stderr.on("data", (chunk: string) => { stderr += chunk; });
   const code = await new Promise<number | null>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", resolve);
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`CLI timed out: ${args.join(" ")}\n${stderr}`));
+    }, 30_000);
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once("exit", (exitCode) => {
+      clearTimeout(timeout);
+      resolve(exitCode);
+    });
   });
   return { code, stdout, stderr };
 }
