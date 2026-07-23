@@ -37,7 +37,7 @@ protocol is specified.
 | --- | --- | --- | --- |
 | Community local-first | A customer-controlled repository policy root authorizes policy-signing keys and recipient snapshots; recipient and recovery private keys unwrap DEKs | Customer policy-signing authority and authorized devices; Git/customer synchronization remains outside key custody but is trusted for signed-state freshness until global consistency is specified | Devices whose recipient or recovery key was authorized when that protected version was sealed, including retained historical versions |
 | Team zero-knowledge coordination | The same customer-controlled policy root and recipient private keys as Community; Team membership results are inputs, not authority | Customer policy-signing authority and authorized devices; Team remains outside key custody but is trusted for availability and freshness of signed metadata until transparency is specified | Devices whose recipient or recovery key was authorized when that protected version was sealed; RoleGit Cloud has no decryption key material |
-| Enterprise customer key provider | The customer's provider policy and wrapping/unwrap keys | Authorized clients and client-side agents plus the customer-controlled provider/provider-side-agent security boundary | Clients and client-side agents currently authorized to unwrap or retaining a previously released DEK; the provider-side boundary is treated as decrypt-capable because it controls unwrap |
+| Enterprise customer key provider | The customer's provider policy and wrapping/unwrap keys | Authorized clients and client-side agents plus the customer-controlled provider/provider-side-agent security boundary | Clients and client-side agents currently authorized to unwrap or that generated or otherwise obtained and retained a DEK; the provider-side boundary is treated as decrypt-capable because it controls unwrap |
 | Enterprise content-blind self-hosted | The customer-controlled policy root and recipient private keys | Customer policy-signing authority and authorized devices; the customer-hosted coordinator has the same freshness limitation as Team | Devices whose recipient or recovery key was authorized when that protected version was sealed, including retained historical versions |
 | Enterprise key-broker self-hosted | The customer's self-hosted broker and KMS/KEK | Authorized clients plus the entire customer-operated broker and KMS boundary | Clients currently authorized to unwrap or retaining a previously released DEK, and the customer-controlled key boundary; no RoleGit-operated service |
 
@@ -88,18 +88,20 @@ above, but does not change retained history.
 In Enterprise key-provider and key-broker modes, and in the centralized prototype, authorization
 gates DEK generation, wrap, or unwrap requests. Credentials, sessions, or tokens expire independently;
 they do not set a cryptographic expiry on a generated DEK. Revocation can deny a later unwrap, but
-cannot recall a DEK or plaintext already released. Merely re-wrapping or re-encrypting the current
-version also leaves older ciphertext and wrapped DEKs in Git. Unlike recipient removal, service-side
-policy revocation can deny future unwraps of both current and historical objects, provided the actor
-did not retain the released material.
+cannot recall a DEK or plaintext already generated or obtained by a client. In the key-provider
+local-wrap variant, provider revocation cannot affect a client-generated DEK while the client or
+client-side agent holds or retains it; provider policy controls only a later unwrap. Merely re-wrapping
+or re-encrypting the current version also leaves older ciphertext and wrapped DEKs in Git. Unlike
+recipient removal, service-side policy revocation can deny future unwraps of both current and
+historical objects, provided the actor did not generate or otherwise obtain and retain the material.
 
 Where historical ciphertext remains decryptable after a policy change, repository-side removal
 requires new DEKs, re-encryption, any required recipient or wrapping-key rotation, and removal of old
 objects and references from Git history, clones, mirrors, and backups. Even that history rotation
 cannot erase DEKs, plaintext, or repository copies an actor already retained. Recipient-mode
 revocation is therefore prospective unless that broader rotation is completed within infrastructure
-the customer controls; service-mediated revocation remains unable to recall previously released
-material.
+the customer controls; service-mediated revocation remains unable to recall previously generated or
+obtained material.
 
 ### Community Local-First
 
@@ -186,7 +188,9 @@ flowchart LR
     D <-->|optional metadata only| T[RoleGit Team: cannot decrypt]
 ```
 
-The authorized client or client-side agent can decrypt after provider authorization.
+The authorized client or client-side agent can decrypt whenever it holds the plaintext DEK. In the B2
+local-wrap variant, it can decrypt immediately after generating the DEK without an unwrap authorization;
+other unlocks require provider authorization.
 Provider-generated and remote-wrap sealing place plaintext DEKs inside the provider/provider-side-agent
 boundary; client-side local public-key wrapping does not do so during sealing. The provider-side
 boundary is nevertheless always treated as decrypt-capable because it controls unwrap. RoleGit Cloud

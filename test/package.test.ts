@@ -61,6 +61,8 @@ test("public docs preserve architecture, release, and parsing boundaries", async
   assert.match(architecture, /provider-side agent runs\s+inside the customer provider security boundary/);
   assert.match(architecture, /Provider-generated and remote-wrap sealing place plaintext DEKs inside the provider\/provider-side-agent\s+boundary/);
   assert.match(architecture, /client-side local public-key wrapping does not do so during sealing/);
+  assert.match(architecture, /local-wrap variant, it can decrypt immediately after generating the DEK without an unwrap authorization/);
+  assert.match(architecture, /provider revocation cannot affect a client-generated DEK while the client or\s+client-side agent holds or retains it/);
   assert.match(protocols, /silently ignore unknown object fields/);
   assert.match(protocols, /not fail-closed extensibility/);
   assert.match(protocols, /`develop` is the integration branch and the base for feature and maintenance pull requests/);
