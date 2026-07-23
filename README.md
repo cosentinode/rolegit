@@ -1,15 +1,36 @@
 # RoleGit
 
-RoleGit adds cryptographic file permissions to Git repositories. GitHub collaborators can clone
-the same repository while only authorized GitHub users and teams can decrypt protected files.
+RoleGit adds cryptographic file permissions to Git repositories. In the target local-first design,
+GitHub collaborators can clone the same repository while each protected version is decryptable on
+devices authorized by a customer-controlled policy when that version is sealed. Removing a recipient
+prevents access to future versions only after sealers receive fresh policy; it does not revoke older
+ciphertext and wrapped keys retained in Git history. The current prototype instead uses a customer-run
+authorization service that can unwrap data keys and is therefore decrypt-capable.
 
 This is an early TypeScript 7 prototype. It includes encrypted vault objects, GitHub device-flow
 interfaces, server-side authorization, and fixed-duration sessions.
 
 > [!WARNING]
-> The centralized authorization service is an experimental prototype for validating the current
-> security model. It is not production-ready and will be superseded by local-first Community mode.
-> See [`docs/security.md`](docs/security.md) and do not use this baseline with real secrets.
+> The centralized authorization service is an experimental, self-hosted-only prototype for validating
+> the current security model. It is not a public RoleGit SaaS offering, is not production-ready, and
+> will be superseded by local-first Community mode. See
+> [`docs/security.md`](docs/security.md) and do not use this baseline with real secrets.
+
+The target Community, Team, and Enterprise boundaries are defined in
+[ADR 0001](docs/adr/0001-product-modes-and-trust-boundaries.md). Community is local-first by default;
+its Git/customer synchronization path remains trusted for signed-state freshness and can delay
+revocation under a stale or split view. Team distributes customer-signed metadata without receiving
+decryptable key material, although its coordinator has the analogous freshness boundary until the
+transparency protocol is specified. Enterprise key authority stays in customer-controlled devices,
+KMS, or self-hosted infrastructure. Across modes, revocation cannot recall plaintext or DEKs already
+released. Recipient-mode removal from retained encrypted history requires re-encryption and history
+rotation, and no mode can erase copies someone already made.
+The recipient policy does not yet authorize sealing identities or require sealer signatures. Until a
+versioned sealer-authentication protocol exists, Community, Team, and Enterprise content-blind
+recipients trust repository write controls, review, and Git provenance against forged replacement
+content; a writer can forge a new decryptable object without learning the displaced plaintext.
+Branch, protocol, and MIT repository governance are defined in
+[ADR 0002](docs/adr/0002-branches-protocols-and-repository-ownership.md).
 
 ## Requirements
 
@@ -45,10 +66,31 @@ rolegit protect .env
 }
 ```
 
+The prototype also reads `authServer` from this tracked file. A repository writer or Git split view
+can replace it, and the CLI checks only that a non-loopback endpoint uses HTTPS; it does not pin the
+endpoint to the intended customer service identity. On a fresh checkout, or a later login after the
+previous session is no longer active, the selected endpoint controls the authentication exchange and
+the key-generation and unwrap requests used by later `seal` and `unlock` operations. GitHub login
+authenticates the user to that selected service, not the service to the user.
+
+An active session or materialization lease prevents a transparent server replacement, and `lock`
+remembers the machine-local server association rather than trusting a later checkout change. Those
+controls do not protect initial or subsequent bootstrap. Before every prototype login, an
+administrator must distribute the expected canonical endpoint through a channel outside Git, and the
+user must verify the exact `.enclist.authServer` value and stop if it changed unexpectedly. Standard
+HTTPS validation alone does not establish that this is the customer's intended service. Durable
+service-identity pinning or removal of this key path is tracked in
+[issue #55](https://github.com/cosentinode/rolegit/issues/55).
+
 `rolegit protect` refuses already tracked files and adds the plaintext path to `.gitignore`.
-Copy the generated vault ID and protected paths into an authorization-service policy based on
-[`server-policy.example.json`](server-policy.example.json). That server-side policy is the access
-authority; changing `.enclist` cannot grant decryption permission.
+For this experimental self-hosted prototype, copy the generated vault ID and protected paths into an
+authorization-service policy based on [`server-policy.example.json`](server-policy.example.json).
+The policy of the service actually contacted authorizes its requests. Changing only tracked vault or
+path data cannot alter the expected service's policy, but replacing `authServer` can bypass that
+service for future seals: a replacement service can return a DEK and wrapped key it controls and later
+decrypt or forge that resulting encrypted version if it obtains the committed object. Redirection does
+not by itself reveal an older object sealed through the expected service because the replacement
+service cannot unwrap its DEK, although it can deny access by receiving the unwrap request instead.
 
 ## Local End-to-End Development
 
@@ -84,9 +126,16 @@ Development authentication is deliberately unsafe and only binds to the loopback
 
 ## Development Policy
 
-`develop` is the integration branch and the base for all pull requests. `main` is release-oriented;
-changes reach it through the release process rather than direct development work. All changes must
-land through a pull request.
+`develop` is the integration branch and the base for feature and maintenance pull requests. `main`
+contains stable release history and is the base for reviewed release-promotion pull requests from
+tested `develop` history, not direct development. All changes must land through a pull request.
+The repository CI workflows delivered by [PR #52](https://github.com/cosentinode/rolegit/pull/52)
+run typecheck, build, test, package dry-run, CLI smoke, and pull-request title checks for pull requests
+to both `develop` and `main`; branch protection requires those check contexts on both branches. That
+is not yet trusted, unspoofable enforcement because the required contexts are produced by the generic
+GitHub Actions app and a pull-request-controlled workflow can duplicate them. [Issue
+#2](https://github.com/cosentinode/rolegit/issues/2) remains open for secure enforcement. Stable
+publication also remains disabled until package ownership and trusted publishing are configured.
 
 ## GitHub Login
 
@@ -184,4 +233,9 @@ active before removing it.
   numeric modes do not configure Windows ACLs; use a private Windows profile and appropriate ACLs.
   OS keychain storage is planned.
 - The authorization service binds to loopback; production TLS and deployment are not implemented.
+- Current v1 encrypted-object, `.enclist`, and server-policy readers reject unsupported versions and
+  validate recognized fields but ignore unknown object fields. This artifact-specific behavior is a
+  documented prototype exception, not a guarantee for every JSON response or a stable extensibility
+  guarantee; producers must not encode security semantics in unknown fields. See
+  [ADR 0002](docs/adr/0002-branches-protocols-and-repository-ownership.md).
 - There is no encrypted merge-conflict workflow yet.
