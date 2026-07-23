@@ -41,6 +41,8 @@ The model considers:
 - a removed or currently authorized user who retains keys, DEKs, plaintext, clones, backups, or
   screenshots;
 - a network attacker, malicious endpoint, or compromised centralized prototype service;
+- a compromised GitHub account, GitHub OAuth or API service, organization or team administrator,
+  GitHub App, App private key, or installation token able to falsify identity or membership results;
 - a malicious or compromised Team coordinator that can observe, withhold, replay, or equivocate over
   metadata but, by design, has no plaintext or decryption key material;
 - a compromised customer KMS, provider-side agent, self-hosted broker, policy signer, administrator,
@@ -67,6 +69,34 @@ prototype service or isolate a client behind a stale metadata view.
   specified and implemented.
 - Backups, editors, shells, CI systems, crash dumps, swap, and user workflows that receive plaintext
   are inside the customer's operational boundary.
+
+## GitHub Identity and Membership
+
+The current prototype trusts GitHub's device OAuth flow and API to bind the user's OAuth token to the
+correct immutable numeric user ID. The authorization service retains that OAuth token in memory for
+the RoleGit session. Direct user rules authorize the stored numeric ID. Team rules revalidate the
+token's current identity and trust GitHub's active team-membership result, using either that user token
+or a repository-scoped installation token obtained with the configured GitHub App private key. The
+server policy's repository name and configured user and team rules are also trusted authorization
+inputs. Development authentication bypasses GitHub entirely and is intentionally trusted only for
+local testing.
+
+A stolen user OAuth token or compromised GitHub account can impersonate that user until the token or
+RoleGit session is revoked or expires. A malicious organization or team administrator, or a
+compromised GitHub membership service, can add an attacker to an authorized team or hide a legitimate
+member. A compromised App private key or installation token can falsify or expose the membership
+queries available to its granted repository and organization permissions; compromise of the
+prototype service also exposes retained user OAuth tokens. These failures can cause unauthorized DEK
+generation or unwrap, disclose GitHub identity and membership metadata, or deny access. RoleGit does
+not independently attest GitHub identities or reconstruct organization membership.
+
+Planned Community mode does not make GitHub identity or membership an independent decryption
+authority: any GitHub-derived directory or membership result is untrusted until incorporated into
+recipient state signed by the customer policy authority. Planned Team may fetch and coordinate those
+results, so GitHub and membership administrators can affect proposals, metadata confidentiality,
+availability, and freshness, but accepted recipient authority still comes from the customer signature
+chain. Enterprise deployments inherit that rule when using GitHub-derived inputs; a customer may
+instead select and assume responsibility for another identity provider and membership authority.
 
 ## Metadata Leakage
 

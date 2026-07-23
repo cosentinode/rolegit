@@ -11,29 +11,25 @@ evaluating or deploying the project.
 Do not include vulnerability details, exploit code, credentials, private keys, customer data, or
 other secrets in a public issue or pull request.
 
-This repository does not currently publish a security email address, and GitHub private
-vulnerability reporting is not currently enabled. To request a private reporting channel, open a
-[security-labeled issue](https://github.com/cosentinode/rolegit/issues/new?labels=area%3Asecurity%2Csecurity-critical)
-containing only:
+Use GitHub's enabled private vulnerability reporting form at
+[Report a vulnerability](https://github.com/cosentinode/rolegit/security/advisories/new). You must be
+signed in to GitHub. Submit the affected source revision or locally built artifact, component and
+mode, reproduction steps or a proof of concept, impact, prerequisites, and any suggested mitigation.
+Do not send real customer secrets; use synthetic canaries.
 
-- a request for private contact;
-- the affected RoleGit version or commit; and
-- a non-sensitive summary such as "possible confidentiality issue in the CLI."
-
-A maintainer will arrange a private channel before asking for technical details. If no private
-channel is arranged, do not post the details publicly. Once contact is established, include the
-affected component and mode, reproduction steps or a proof of concept, impact, prerequisites, and
-any suggested mitigation. Do not send real customer secrets; use synthetic canaries.
-
-If GitHub later shows a **Report a vulnerability** button on this repository's Security page, use
-that private route instead of opening an issue. This policy does not claim that feature is available
-today.
+The report and its discussion are a private repository security advisory rather than a public issue,
+so the reporter identity, report existence, timestamps, affected revision, category, and technical
+details are not exposed through public issues, notifications, search, or repository history. GitHub,
+repository administrators and security managers, and people explicitly added to the advisory can
+access advisory metadata and content. Use a reporting GitHub account whose identity you are willing
+to disclose to those parties. This repository does not publish a separate security email address; do
+not open a public issue or pull request to request private contact.
 
 ## Response Targets
 
 These are good-faith targets for this volunteer prototype, not service-level guarantees:
 
-- acknowledge a private report or channel request within 3 business days;
+- acknowledge a private report within 3 business days;
 - provide an initial severity and scope assessment within 7 business days after receiving details;
 - provide a status update at least every 14 calendar days while remediation is active; and
 - coordinate disclosure timing with the reporter after a fix or mitigation is available.
@@ -59,9 +55,11 @@ a stated control or an undocumented expansion of a trust boundary is in scope.
 
 ## Supported Versions
 
-RoleGit has no stable or production-supported release. Security fixes are made only on the latest
-`develop` revision and then follow the repository's release process. Older commits, npm package
-`0.1.0`, forks, and modified deployments do not receive security updates. The current prototype and
+RoleGit has no stable or production-supported release, and no RoleGit package is currently published
+to npm. Security fixes are made only on the latest `develop` source revision and locally built
+artifacts from that exact revision, then follow the repository's release process. The `0.1.0` value in
+`package.json` is prototype metadata, not a published npm release. Older commits, older local
+artifacts, forks, and modified deployments do not receive security updates. The current prototype and
 all planned modes remain pre-production; this support statement does not make them suitable for real
 secrets.
 
