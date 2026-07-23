@@ -25,6 +25,10 @@ transparency protocol is specified. Enterprise key authority stays in customer-c
 KMS, or self-hosted infrastructure. Across modes, revocation cannot recall plaintext or DEKs already
 released. Recipient-mode removal from retained encrypted history requires re-encryption and history
 rotation, and no mode can erase copies someone already made.
+The recipient policy does not yet authorize sealing identities or require sealer signatures. Until a
+versioned sealer-authentication protocol exists, Community, Team, and Enterprise content-blind
+recipients trust repository write controls, review, and Git provenance against forged replacement
+content; a writer can forge a new decryptable object without learning the displaced plaintext.
 Branch, protocol, and MIT repository governance are defined in
 [ADR 0002](docs/adr/0002-branches-protocols-and-repository-ownership.md).
 
@@ -125,6 +129,10 @@ Development authentication is deliberately unsafe and only binds to the loopback
 `develop` is the integration branch and the base for feature and maintenance pull requests. `main`
 contains stable release history and is the base for reviewed release-promotion pull requests from
 tested `develop` history, not direct development. All changes must land through a pull request.
+This is the intended policy. The current repository CI workflow runs only for pull requests to
+`develop`, so promotion PRs to `main` are not yet repository-CI-gated and stable publication is not
+enabled under this policy. [Issue #2](https://github.com/cosentinode/rolegit/issues/2) and
+[PR #52](https://github.com/cosentinode/rolegit/pull/52) track that CI and trusted-enforcement work.
 
 ## GitHub Login
 

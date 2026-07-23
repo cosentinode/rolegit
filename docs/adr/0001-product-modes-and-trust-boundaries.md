@@ -31,14 +31,15 @@ Enterprise adds customer-controlled key-provider and self-hosted choices. A Role
 service is never a policy or decryption-key authority and does not receive the material needed to
 decrypt files; Community's Git/customer synchronization path and Team's coordinator remain part of
 their respective authorization-freshness boundaries until a global transparency and consistency
-protocol is specified.
+protocol is specified. Recipient-mode content authenticity also remains in the repository write and
+Git provenance boundary until a sealer-authentication protocol is specified.
 
 | Mode | Key authority | Confidentiality trust boundary | Actors able to decrypt protected files |
 | --- | --- | --- | --- |
-| Community local-first | A customer-controlled repository policy root authorizes policy-signing keys and recipient snapshots; recipient and recovery private keys unwrap DEKs | Customer policy-signing authority and authorized devices; Git/customer synchronization remains outside key custody but is trusted for signed-state freshness until global consistency is specified | Devices whose recipient or recovery key was authorized when that protected version was sealed, and authorized sealing devices that generated or otherwise obtained and retained its plaintext DEK |
-| Team zero-knowledge coordination | The same customer-controlled policy root and recipient private keys as Community; Team membership results are inputs, not authority | Customer policy-signing authority and authorized devices; Team remains outside key custody but is trusted for availability and freshness of signed metadata until transparency is specified | Devices whose recipient or recovery key was authorized when that protected version was sealed, and authorized sealing devices that generated or otherwise obtained and retained its plaintext DEK; RoleGit Cloud has no decryption key material |
+| Community local-first | A customer-controlled repository policy root authorizes policy-signing keys and recipient snapshots; recipient and recovery private keys unwrap DEKs | Customer policy-signing authority and authorized devices; Git/customer synchronization remains outside key custody but is trusted for signed-state freshness until global consistency is specified | Devices whose recipient or recovery key was authorized when that protected version was sealed, and sealing devices that generated or otherwise obtained and retained its plaintext DEK |
+| Team zero-knowledge coordination | The same customer-controlled policy root and recipient private keys as Community; Team membership results are inputs, not authority | Customer policy-signing authority and authorized devices; Team remains outside key custody but is trusted for availability and freshness of signed metadata until transparency is specified | Devices whose recipient or recovery key was authorized when that protected version was sealed, and sealing devices that generated or otherwise obtained and retained its plaintext DEK; RoleGit Cloud has no decryption key material |
 | Enterprise customer key provider | The customer's provider policy and wrapping/unwrap keys | Authorized clients and client-side agents plus the customer-controlled provider/provider-side-agent security boundary | Clients and client-side agents currently authorized to unwrap or that generated or otherwise obtained and retained a DEK; the provider-side boundary is treated as decrypt-capable because it controls unwrap |
-| Enterprise content-blind self-hosted | The customer-controlled policy root and recipient private keys | Customer policy-signing authority and authorized devices; the customer-hosted coordinator has the same freshness limitation as Team | Devices whose recipient or recovery key was authorized when that protected version was sealed, and authorized sealing devices that generated or otherwise obtained and retained its plaintext DEK |
+| Enterprise content-blind self-hosted | The customer-controlled policy root and recipient private keys | Customer policy-signing authority and authorized devices; the customer-hosted coordinator has the same freshness limitation as Team | Devices whose recipient or recovery key was authorized when that protected version was sealed, and sealing devices that generated or otherwise obtained and retained its plaintext DEK |
 | Enterprise key-broker self-hosted | The customer's self-hosted broker and KMS/KEK | Authorized clients plus the entire customer-operated broker and KMS boundary | Clients currently authorized to unwrap or retaining a previously released DEK, and the customer-controlled key boundary; no RoleGit-operated service |
 
 Specific object schemas, algorithms, signature encodings, and key-provider APIs belong in versioned protocol
@@ -76,12 +77,30 @@ an isolated or newly enrolled device. Until a versioned transparency and freshne
 these gaps, neither mode has a global latest-state guarantee. A Git host or Team service still cannot
 decrypt by itself.
 
+### Content Authenticity and Sealer Authority
+
+The policy root authorizes recipient state; it does not currently authorize sealing identities, and
+the target recipient format does not yet specify a sealer signature that recipients verify. AEAD
+authentication detects modification of an object without its DEK, but it does not prove who created a
+new, internally valid object. A repository writer or Git host presenting a split view can choose a new
+DEK, encrypt attacker-chosen plaintext, wrap that DEK to valid recipients from a signed snapshot, and
+substitute the resulting decryptable object. That actor still cannot recover the displaced customer
+plaintext, but can forge replacement content.
+
+Community, Team, and Enterprise content-blind recipients therefore trust repository write controls,
+review, and Git provenance for content authenticity. "Sealing device" in this ADR identifies an actor
+that performs sealing and may retain its DEK; it does not mean the customer policy cryptographically
+authorized that actor. A future versioned format may move this boundary by defining sealer keys,
+policy authorization, object signatures, and mandatory recipient verification. Until then, the
+diagrams show the trusted write path explicitly and no local-first mode may claim cryptographically
+authenticated sealer provenance.
+
 ### Revocation and Retained History
 
 Recipient snapshots authorize new seals; they do not revoke ciphertext already created. In Community,
 Team, and the Enterprise content-blind profile, Git retains each encrypted object and its DEK wrapped
 to the recipients authorized at seal time. A removed recipient who retains that private key can later
-check out and decrypt an older commit. An authorized sealing device can also decrypt any version whose
+check out and decrypt an older commit. A sealing device can also decrypt any version whose
 plaintext DEK it generated or otherwise obtained and retained, independently of whether it holds a
 recipient or recovery private key. Publishing a new snapshot or re-sealing the current version with a
 fresh DEK excludes the recipient from that new version, subject to the freshness limitation above,
@@ -114,10 +133,11 @@ the customer's synchronization path remain trusted to deliver fresh, globally co
 
 ```mermaid
 flowchart LR
-    R[Customer policy root] -->|signed policy and recipient snapshot| G[Git host: cannot decrypt]
-    G -->|signed public state| A[Authorized sealing device: plaintext-DEK holder and decrypt-capable]
+    R[Customer policy root] -->|signed policy and recipient snapshot| G[Git host: cannot recover customer plaintext; authenticity trusted]
+    G -->|signed public state| A[Sealing device: plaintext-DEK holder and decrypt-capable]
     O[Existing device or customer recovery] -->|authenticated root and checkpoint bootstrap| A
     A -->|seal: verify state, generate plaintext DEK, encrypt, and wrap DEK to recipients| G
+    W[Repository writer or Git split view] -->|can forge a replacement; cannot recover displaced plaintext| G
     G -->|unlock: encrypted object and wrapped DEK| B[Authorized recipient device: plaintext-DEK holder and decrypt-capable]
     B -->|unlock: unwrap plaintext DEK with private key and decrypt locally| P[Plaintext on authorized device]
     G -->|unlock: encrypted object and recovery-wrapped DEK| H[Authorized recovery-key holder: plaintext-DEK holder and decrypt-capable]
@@ -126,10 +146,11 @@ flowchart LR
 ```
 
 Authorized recipient and recovery-key devices can decrypt objects sealed to their keys, including
-from retained history after their later removal. An authorized sealing device can also decrypt an
+from retained history after their later removal. A sealing device can also decrypt an
 object when it generated or otherwise obtained and retained the plaintext DEK. The Git host and
-RoleGit Cloud cannot, but a stale or split Git view can also delay revocation for a future seal as
-described above.
+RoleGit Cloud cannot recover customer plaintext, but repository writers and split Git views can forge
+replacement content under the authenticity boundary described above. A stale or split Git view can
+also delay revocation for a future seal.
 
 ### Team Zero-Knowledge Coordination
 
@@ -142,21 +163,24 @@ obtain encrypted objects from Git and decrypt locally.
 ```mermaid
 flowchart LR
     R[Customer policy root] -->|signed policy and recipient snapshot| T[RoleGit Team: metadata only; cannot decrypt]
-    O[Existing device or customer recovery] -->|authenticated root and checkpoint bootstrap| S[Authorized sealing device: plaintext-DEK holder and decrypt-capable]
+    O[Existing device or customer recovery] -->|authenticated root and checkpoint bootstrap| S[Sealing device: plaintext-DEK holder and decrypt-capable]
     T -->|signed state and untrusted membership inputs| S
-    S -->|seal: verify state, generate plaintext DEK, encrypt, and wrap DEK to recipients| G[Git host: cannot decrypt]
+    S -->|seal: verify state, generate plaintext DEK, encrypt, and wrap DEK to recipients| G[Git host: cannot recover customer plaintext; authenticity trusted]
+    W[Repository writer or Git split view] -->|can forge a replacement; cannot recover displaced plaintext| G
     G -->|unlock: encrypted object and wrapped DEK| D[Authorized recipient device: plaintext-DEK holder and decrypt-capable]
     D -->|unlock: unwrap plaintext DEK with private key and decrypt locally| P[Plaintext on authorized device]
     G -->|unlock: encrypted object and recovery-wrapped DEK| H[Authorized recovery-key holder: plaintext-DEK holder and decrypt-capable]
     H -->|unlock: unwrap plaintext DEK with recovery private key and decrypt locally| P
 ```
 
-A device holding an authorized recipient or recovery private key can directly decrypt, as can an
-authorized sealing device that generated or otherwise obtained and retained the plaintext DEK.
+A device holding an authorized recipient or recovery private key can directly decrypt, as can a
+sealing device that generated or otherwise obtained and retained the plaintext DEK.
 RoleGit Team, other RoleGit Cloud components, and the Git host receive no decryption key material.
 Team's remaining metadata-freshness trust and delayed-revocation risk are defined above rather than
 hidden by an unconditional confidentiality claim. Recipient removal is not retroactive for objects
-retained in Git history and cannot recall a DEK retained by a sealing device.
+retained in Git history and cannot recall a DEK retained by a sealing device. Content authenticity
+still depends on the repository write and Git provenance boundary; Team metadata coordination does
+not authenticate a sealer.
 
 ### Enterprise Customer Key Provider
 
@@ -211,14 +235,15 @@ combined with the separate customer-KMS profile above.
 #### Content-Blind Coordinator
 
 The service has the Team metadata boundary and the same customer-controlled policy-root,
-verification, and freshness rules. Device or recovery private keys remain in client custody, and only
-authorized devices can decrypt.
+verification, and freshness rules. Device or recovery private keys remain in client custody. Devices
+holding those keys, and sealing devices while they hold or retain a plaintext DEK, can decrypt.
 
 ```mermaid
 flowchart LR
     R[Customer policy root] -->|signed policy and recipient snapshot| C[Customer content-blind coordinator: cannot decrypt]
-    C -->|signed metadata only| S[Authorized customer sealing device: plaintext-DEK holder and decrypt-capable]
-    S -->|seal: verify state, generate plaintext DEK, encrypt, and wrap DEK to recipients| G[Git host: cannot decrypt]
+    C -->|signed metadata only| S[Customer sealing device: plaintext-DEK holder and decrypt-capable]
+    S -->|seal: verify state, generate plaintext DEK, encrypt, and wrap DEK to recipients| G[Git host: cannot recover customer plaintext; authenticity trusted]
+    W[Repository writer or Git split view] -->|can forge a replacement; cannot recover displaced plaintext| G
     G -->|unlock: encrypted object and wrapped DEK| D[Authorized customer recipient device: plaintext-DEK holder and decrypt-capable]
     D -->|unlock: unwrap plaintext DEK with private key and decrypt locally| P[Plaintext on customer device]
     G -->|unlock: encrypted object and recovery-wrapped DEK| H[Authorized recovery-key holder: plaintext-DEK holder and decrypt-capable]
@@ -247,11 +272,12 @@ flowchart LR
 
 In the content-blind profile, recipient and recovery-key devices authorized when an object was sealed
 can decrypt it even after later removal, subject also to the documented signed-metadata freshness
-boundary for future seals. An authorized sealing device can independently decrypt when it generated
+boundary for future seals. A sealing device can independently decrypt when it generated
 or otherwise obtained and retained the plaintext DEK, which recipient removal cannot recall. In the
 key-broker profile, currently authorized devices, devices retaining a released DEK, and the
 customer-controlled broker/KMS boundary are decrypt-capable; broker revocation cannot recall released
-material. RoleGit Cloud receives no decryption key material in either profile.
+material. RoleGit Cloud receives no decryption key material in either profile. The content-blind
+profile has the same repository write and Git provenance authenticity boundary as Community and Team.
 
 ## Centralized Prototype
 
@@ -322,6 +348,8 @@ service and thereby compromise confidentiality and authenticity of future seals.
   erase retained copies.
 - Team can improve coordination but cannot perform server-side plaintext processing or key recovery;
   it remains trusted for signed-metadata freshness until the transparency protocol is specified.
+- Recipient-mode policy authorizes recipients, not sealers; without specified sealer signatures,
+  recipients trust repository write controls and Git provenance against forged replacement content.
 - Enterprise customers that select key-provider or key-broker modes intentionally expand the decrypt-capable
   boundary to customer-controlled infrastructure.
 - The centralized prototype's tracked service endpoint is inside its bootstrap and confidentiality

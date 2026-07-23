@@ -13,6 +13,9 @@ implementation. The repository also needs a predictable path from development to
 
 ### Branch and Release Policy
 
+The following bullets define the intended release policy, not the repository's complete current
+enforcement state.
+
 - `develop` is the integration branch and the base for feature and maintenance pull requests.
 - Once release automation is enabled, successful releases from `develop` use a prerelease channel such
   as npm `next`. They are not stable releases.
@@ -23,6 +26,15 @@ implementation. The repository also needs a predictable path from development to
 - Stable tags and artifacts are produced from `main`; prerelease tags and artifacts are produced from
   `develop`. Release automation must not publish until package ownership and trusted publishing are
   deliberately configured.
+
+Currently, the repository's only CI workflow runs for pull requests whose base is `develop`. A
+release-promotion pull request to `main` therefore receives no repository build, test, package
+dry-run, or CLI checks, so stable promotion and publication are not yet gated as this policy intends.
+[Issue #2](https://github.com/cosentinode/rolegit/issues/2) and
+[PR #52](https://github.com/cosentinode/rolegit/pull/52) track CI for both bases and the unresolved
+trusted-enforcement work. This documentation decision neither implements those workflows nor treats
+them as complete. Until that work is resolved and verified, maintainers must not claim that a `main`
+promotion satisfied the intended repository CI gate or publish a stable artifact on that basis.
 
 ### Protocol Versioning
 
@@ -73,7 +85,8 @@ that customer deployments or separately distributed service implementations are 
 
 ## Consequences
 
-- Contributors target `develop`; release promotion to `main` is explicit and auditable.
+- Contributors target `develop`; the intended release promotion to `main` is explicit and auditable,
+  but its repository CI gate remains pending under issue #2.
 - Persisted and network contracts evolve independently from product packaging.
 - Future specified contracts fail closed on unsupported versions or semantics unless their schema
   proves safe extensibility; current permissive v1 unknown-field handling remains a documented

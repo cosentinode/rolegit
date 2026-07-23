@@ -22,15 +22,20 @@ test("public docs preserve architecture, release, and parsing boundaries", async
   assert.match(readme, /does not pin the\s+endpoint to the intended customer service identity/);
   assert.match(readme, /`develop` is the integration branch and the base for feature and maintenance pull requests/);
   assert.match(readme, /`main`\s+contains stable release history and is the base for reviewed release-promotion pull requests/);
+  assert.match(readme, /current repository CI workflow runs only for pull requests to\s+`develop`/);
+  assert.match(readme, /recipient policy does not yet authorize sealing identities or require sealer signatures/);
   assert.match(security, /stale or split view can delay revocation for future seals/);
   assert.match(security, /persisted wrapped DEKs and DEKs already\s+released to clients do not acquire that session expiry/);
   assert.match(security, /legitimate service policy controls only requests that\s+reach it and is not the sole authority for future seals/);
+  assert.match(security, /trust repository write controls and Git\s+provenance for content authenticity/);
   assert.match(architecture, /inside Community's authorization-freshness\s+boundary/);
   assert.match(architecture, /removed recipient who retains that private key can later\s+check out and decrypt an older commit/);
-  assert.match(architecture, /An authorized sealing device can also decrypt any version whose\s+plaintext DEK it generated or otherwise obtained and retained/);
+  assert.match(architecture, /A sealing device can also decrypt any version whose\s+plaintext DEK it generated or otherwise obtained and retained/);
   assert.match(architecture, /Credentials, sessions, or tokens expire independently/);
   assert.match(architecture, /legitimate server policy is therefore not the sole authority for future seals/);
   assert.match(architecture, /endpoint replacement alone does not reveal objects\s+previously sealed through the expected service/);
+  assert.match(architecture, /policy root authorizes recipient state; it does not currently authorize sealing identities/);
+  assert.match(architecture, /no local-first mode may claim cryptographically\s+authenticated sealer provenance/);
   const diagrams = architecture.match(/```mermaid\r?\n[\s\S]*?\r?\n```/g) ?? [];
   assert.equal(diagrams.length, 6);
   for (const diagram of diagrams) {
@@ -45,9 +50,11 @@ test("public docs preserve architecture, release, and parsing boundaries", async
   ]) {
     const recipientDiagram = diagrams.find((diagram) => diagram.includes(recipientDiagramMarker));
     assert.ok(recipientDiagram);
-    assert.match(recipientDiagram, /Authorized(?: customer)? sealing device: plaintext-DEK holder and decrypt-capable/);
+    assert.match(recipientDiagram, /(?:Customer )?[Ss]ealing device: plaintext-DEK holder and decrypt-capable/);
     assert.match(recipientDiagram, /Authorized recovery-key holder: plaintext-DEK holder and decrypt-capable/);
     assert.match(recipientDiagram, /unlock: unwrap plaintext DEK with recovery private key and decrypt locally/);
+    assert.match(recipientDiagram, /Repository writer or Git split view/);
+    assert.match(recipientDiagram, /can forge a replacement; cannot recover displaced plaintext/);
   }
   const keyProviderDiagram = diagrams.find((diagram) => diagram.includes("Customer key provider or provider-side customer agent"));
   assert.ok(keyProviderDiagram);
@@ -69,6 +76,9 @@ test("public docs preserve architecture, release, and parsing boundaries", async
   assert.match(protocols, /not fail-closed extensibility/);
   assert.match(protocols, /`develop` is the integration branch and the base for feature and maintenance pull requests/);
   assert.match(protocols, /`main` contains stable release history and is the base for reviewed release-promotion pull requests/);
+  assert.match(protocols, /only CI workflow runs for pull requests whose base is `develop`/);
+  assert.match(protocols, /Issue #2.*and\s+.*PR #52[\s\S]*track CI for both bases and the unresolved\s+trusted-enforcement work/);
+  assert.match(protocols, /must not claim that a `main`\s+promotion satisfied the intended repository CI gate/);
 });
 
 test("package rebuild excludes stale output and includes required files", async (context) => {

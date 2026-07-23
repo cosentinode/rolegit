@@ -12,6 +12,10 @@ implemented; a stale or split view can delay revocation for future seals. Neithe
 receives plaintext or decryption key material. This is separate from the decrypt-capable prototype
 boundary documented here. A removed recipient can still decrypt an older Git object whose DEK was
 wrapped to that recipient; re-encrypting current content does not revoke copies retained in history.
+The recipient policy authenticates recipient state, not sealing identities. No sealer signature and
+verification contract is specified yet, so those target modes trust repository write controls and Git
+provenance for content authenticity: a repository writer or split view can forge attacker-chosen
+replacement content that valid recipients can decrypt without recovering the displaced plaintext.
 
 The prototype separates repository access from secret-decryption access. Git stores only encrypted
 vault objects. For each sealed version, the customer-run authorization service generates a fresh data
