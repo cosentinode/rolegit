@@ -29,6 +29,7 @@ test("rejects non-Conventional Commits titles", () => {
   for (const title of [
     "Add login command",
     "feature: add login command",
+    "fix(): handle missing configuration",
     "fix: ",
     "Merge pull request #123 from owner/branch",
     "v1.2.3",

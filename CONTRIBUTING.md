@@ -33,6 +33,10 @@ the same quality checks expected for a pull request.
 - Do not publish stable packages or artifacts until package ownership and trusted publishing are
   deliberately configured.
 
+CODEOWNERS currently requests review from the sole repository owner but does not enforce an approval.
+GitHub does not allow a pull request author to approve their own change, so requiring code-owner
+approval would deadlock owner-authored pull requests until an independent eligible reviewer is added.
+
 This workflow implements the release policy in
 [`ADR 0002`](docs/adr/0002-branches-protocols-and-repository-ownership.md). Required GitHub Actions
 contexts are not yet trusted, unspoofable enforcement; do not describe them as such while
