@@ -275,6 +275,59 @@ test("protect, seal, lock, and unlock workflow", async (context) => {
   await assert.rejects(() => stat(path.join(root, ".env")), { code: "ENOENT" });
 });
 
+test("workflow output does not expose secret canaries", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-output-canary-");
+  process.env.ROLEGIT_HOME = `${root}-home`;
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  const plaintextCanary = "PLAINTEXT_CANARY_ISSUE_6";
+  const kekCanary = "KEK_CANARY_ISSUE_6";
+  const serverPolicy: ServerPolicy = {
+    version: 1,
+    sessionMinutes: 60,
+    keyId: "output-canary-key",
+    developmentUsers: [{ id: 101, login: "output-canary-user" }],
+    vaults: {},
+  };
+  const server = createAuthServer({
+    policy: serverPolicy,
+    keyEncryptionKey: Buffer.from(kekCanary.padEnd(32, "!")),
+    allowDevelopmentAuth: true,
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  context.after(() => server.close());
+  const authServer = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const output: string[] = [];
+  const originalLog = console.log;
+  const originalError = console.error;
+  console.log = (...values: unknown[]) => output.push(values.join(" "));
+  console.error = (...values: unknown[]) => output.push(values.join(" "));
+
+  let tokenCanary = "";
+  try {
+    await initialize(root, authServer);
+    await writeFile(path.join(root, ".env"), `${plaintextCanary}=value\n`);
+    await protect(root, ".env");
+    const enclist = await loadEnclist(root);
+    serverPolicy.vaults[enclist.vaultId] = {
+      repository: "local/output-canary",
+      files: { ".env": { users: [101], teams: [] } },
+    };
+    tokenCanary = (await login(root, authServer, 101)).token;
+    await seal(root, []);
+    await lock(root);
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+  }
+
+  const renderedOutput = output.join("\n");
+  assert.notEqual(tokenCanary, "");
+  assert.doesNotMatch(renderedOutput, new RegExp(plaintextCanary));
+  assert.doesNotMatch(renderedOutput, new RegExp(kekCanary));
+  assert.doesNotMatch(renderedOutput, new RegExp(tokenCanary));
+});
+
 test("failed partial unlock retains cleanup ownership for plaintext rollback failures", async (context) => {
   const root = await temporaryDirectory(context, "rolegit-partial-unlock-");
   process.env.ROLEGIT_HOME = `${root}-home`;

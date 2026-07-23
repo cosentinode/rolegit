@@ -9,9 +9,11 @@ import test from "node:test";
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
 test("public docs preserve architecture, release, and parsing boundaries", async () => {
-  const [readme, security, architecture, protocols] = await Promise.all([
+  const [readme, policy, security, threatModel, architecture, protocols] = await Promise.all([
     readFile(path.join(projectRoot, "README.md"), "utf8"),
+    readFile(path.join(projectRoot, "SECURITY.md"), "utf8"),
     readFile(path.join(projectRoot, "docs/security.md"), "utf8"),
+    readFile(path.join(projectRoot, "docs/threat-model.md"), "utf8"),
     readFile(path.join(projectRoot, "docs/adr/0001-product-modes-and-trust-boundaries.md"), "utf8"),
     readFile(path.join(projectRoot, "docs/adr/0002-branches-protocols-and-repository-ownership.md"), "utf8"),
   ]);
@@ -29,6 +31,14 @@ test("public docs preserve architecture, release, and parsing boundaries", async
   assert.match(security, /persisted wrapped DEKs and DEKs already\s+released to clients do not acquire that session expiry/);
   assert.match(security, /legitimate service policy controls only requests that\s+reach it and is not the sole authority for future seals/);
   assert.match(security, /trust repository write controls and Git\s+provenance for content authenticity/);
+  assert.match(policy, /private\s+vulnerability reporting is not currently enabled/);
+  assert.match(policy, /acknowledge a private report or channel request within 3 business days/);
+  assert.match(threatModel, /## Planned Community Mode/);
+  assert.match(threatModel, /## Planned Team Mode/);
+  assert.match(threatModel, /## Planned Enterprise Modes/);
+  assert.match(threatModel, /\*\*DRM:\*\*/);
+  assert.match(threatModel, /\*\*Retroactive forgetting:\*\*/);
+  assert.match(threatModel, /\*\*Malware resistance:\*\*/);
   assert.match(architecture, /inside Community's authorization-freshness\s+boundary/);
   assert.match(architecture, /removed recipient who retains that private key can later\s+check out and decrypt an older commit/);
   assert.match(architecture, /A sealing device can also decrypt any version whose\s+plaintext DEK it generated or otherwise obtained and retained/);
@@ -98,6 +108,7 @@ test("package rebuild excludes stale output and includes required files", async 
     "package-lock.json",
     "tsconfig.json",
     "README.md",
+    "SECURITY.md",
     "LICENSE",
     "server-policy.example.json",
     "src",
@@ -124,7 +135,9 @@ test("package rebuild excludes stale output and includes required files", async 
   assert.ok(files.includes("dist/src/cli.js"));
   for (const documentation of [
     "README.md",
+    "SECURITY.md",
     "docs/security.md",
+    "docs/threat-model.md",
     "docs/adr/0001-product-modes-and-trust-boundaries.md",
     "docs/adr/0002-branches-protocols-and-repository-ownership.md",
   ]) {

@@ -1,8 +1,24 @@
 # Contributing to RoleGit
 
-RoleGit is an early security-sensitive prototype. Keep pull requests focused, preserve the trust
-boundaries in [`docs/security.md`](docs/security.md) and the architecture decision records, and never
-use real secrets while developing or testing.
+RoleGit is an early security-sensitive prototype. Keep pull requests focused and preserve the trust
+boundaries in the [`threat model`](docs/threat-model.md), [`prototype security model`](docs/security.md),
+and architecture decision records.
+
+## Handle Secrets Safely
+
+- Never use or commit real customer plaintext, credentials, access or session tokens, private keys,
+  recovery material, or production configuration in code, tests, fixtures, examples, logs, issues, or
+  pull requests.
+- Use conspicuous synthetic canaries for tests. Keep assertions that prevent plaintext, KEKs, private
+  keys, and tokens from appearing in user-facing output when changing logging or error paths.
+- Review staged changes and generated/package output before committing. Treat build artifacts, debug
+  logs, screenshots, and copied terminal output as possible disclosure paths.
+- If a real secret enters Git, an issue, CI output, or another shared system, stop sharing it, notify a
+  maintainer through the process in [`SECURITY.md`](SECURITY.md), and rotate or revoke it immediately.
+  Deleting a branch, issue, or current file does not remove history or retained copies.
+
+These rules address accidental contributor disclosure; they do not change the local-compromise,
+historical-revision, or user-copy limits in the [threat model](docs/threat-model.md).
 
 ## Set Up a Clean Clone
 

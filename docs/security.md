@@ -1,9 +1,9 @@
 # Current Prototype Security Model
 
 This document covers the current v1 experimental, self-hosted-only prototype. It is not the target
-Community or Team architecture and is not offered as a public RoleGit SaaS service. The planned mode
-boundaries are defined in
-[ADR 0001](adr/0001-product-modes-and-trust-boundaries.md).
+Community or Team architecture and is not offered as a public RoleGit SaaS service. The complete
+[threat model](threat-model.md) covers the prototype and each planned product mode; its boundaries are
+grounded in [ADR 0001](adr/0001-product-modes-and-trust-boundaries.md).
 
 In the target Community and Team modes, a customer-controlled policy root authorizes recipient
 snapshots. Community's Git/customer synchronization path and Team's coordinator remain trusted for
