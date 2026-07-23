@@ -27,14 +27,19 @@ enforcement state.
   `develop`. Release automation must not publish until package ownership and trusted publishing are
   deliberately configured.
 
-Currently, the repository's only CI workflow runs for pull requests whose base is `develop`. A
-release-promotion pull request to `main` therefore receives no repository build, test, package
-dry-run, or CLI checks, so stable promotion and publication are not yet gated as this policy intends.
-[Issue #2](https://github.com/cosentinode/rolegit/issues/2) and
-[PR #52](https://github.com/cosentinode/rolegit/pull/52) track CI for both bases and the unresolved
-trusted-enforcement work. This documentation decision neither implements those workflows nor treats
-them as complete. Until that work is resolved and verified, maintainers must not claim that a `main`
-promotion satisfied the intended repository CI gate or publish a stable artifact on that basis.
+[PR #52](https://github.com/cosentinode/rolegit/pull/52) delivered CI workflows for pull requests whose
+base is either `develop` or `main`. Both bases receive typecheck, build, Ubuntu and Windows tests,
+package dry-run, CLI smoke, pull-request title logic tests, and Conventional Commits title checks.
+Branch protection requires those check contexts on both branches and includes administrators.
+
+Workflow execution and nominally required contexts are not the same as trusted, unspoofable
+enforcement. On this personal repository, required contexts are bound to the generic GitHub Actions
+app, so a pull-request-controlled workflow can duplicate a required context name. [Issue
+#2](https://github.com/cosentinode/rolegit/issues/2) remains open for organization-level required
+workflows or a dedicated least-privilege status producer. Until that work is resolved and verified,
+maintainers may state that CI runs and its contexts are required on both bases, but must not claim that
+either branch has trusted, unspoofable CI enforcement. Stable publication also remains disabled until
+package ownership and trusted publishing are deliberately configured.
 
 ### Protocol Versioning
 
@@ -85,8 +90,8 @@ that customer deployments or separately distributed service implementations are 
 
 ## Consequences
 
-- Contributors target `develop`; the intended release promotion to `main` is explicit and auditable,
-  but its repository CI gate remains pending under issue #2.
+- Contributors target `develop`; release promotions to `main` receive the same CI suite, while trusted,
+  unspoofable enforcement remains pending under issue #2.
 - Persisted and network contracts evolve independently from product packaging.
 - Future specified contracts fail closed on unsupported versions or semantics unless their schema
   proves safe extensibility; current permissive v1 unknown-field handling remains a documented

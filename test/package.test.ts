@@ -22,7 +22,8 @@ test("public docs preserve architecture, release, and parsing boundaries", async
   assert.match(readme, /does not pin the\s+endpoint to the intended customer service identity/);
   assert.match(readme, /`develop` is the integration branch and the base for feature and maintenance pull requests/);
   assert.match(readme, /`main`\s+contains stable release history and is the base for reviewed release-promotion pull requests/);
-  assert.match(readme, /current repository CI workflow runs only for pull requests to\s+`develop`/);
+  assert.match(readme, /CI workflows delivered by .*PR #52[\s\S]*pull requests\s+to both `develop` and `main`/);
+  assert.match(readme, /not yet trusted, unspoofable enforcement[\s\S]*generic\s+GitHub Actions app[\s\S]*Issue\s+#2.*remains open for secure enforcement/);
   assert.match(readme, /recipient policy does not yet authorize sealing identities or require sealer signatures/);
   assert.match(security, /stale or split view can delay revocation for future seals/);
   assert.match(security, /persisted wrapped DEKs and DEKs already\s+released to clients do not acquire that session expiry/);
@@ -81,9 +82,12 @@ test("public docs preserve architecture, release, and parsing boundaries", async
   assert.match(protocols, /not fail-closed extensibility/);
   assert.match(protocols, /`develop` is the integration branch and the base for feature and maintenance pull requests/);
   assert.match(protocols, /`main` contains stable release history and is the base for reviewed release-promotion pull requests/);
-  assert.match(protocols, /only CI workflow runs for pull requests whose base is `develop`/);
-  assert.match(protocols, /Issue #2.*and\s+.*PR #52[\s\S]*track CI for both bases and the unresolved\s+trusted-enforcement work/);
-  assert.match(protocols, /must not claim that a `main`\s+promotion satisfied the intended repository CI gate/);
+  assert.match(protocols, /PR #52.*delivered CI workflows for pull requests whose\s+base is either `develop` or `main`/);
+  assert.match(protocols, /Both bases receive typecheck, build, Ubuntu and Windows tests,\s+package dry-run, CLI smoke/);
+  assert.match(protocols, /Branch protection requires those check contexts on both branches/);
+  assert.match(protocols, /generic GitHub Actions\s+app[\s\S]*pull-request-controlled workflow can duplicate a required context name/);
+  assert.match(protocols, /Issue\s+#2.*remains open for organization-level required\s+workflows or a dedicated least-privilege status producer/);
+  assert.match(protocols, /must not claim that\s+either branch has trusted, unspoofable CI enforcement/);
 });
 
 test("package rebuild excludes stale output and includes required files", async (context) => {

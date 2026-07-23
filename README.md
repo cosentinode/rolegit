@@ -129,10 +129,13 @@ Development authentication is deliberately unsafe and only binds to the loopback
 `develop` is the integration branch and the base for feature and maintenance pull requests. `main`
 contains stable release history and is the base for reviewed release-promotion pull requests from
 tested `develop` history, not direct development. All changes must land through a pull request.
-This is the intended policy. The current repository CI workflow runs only for pull requests to
-`develop`, so promotion PRs to `main` are not yet repository-CI-gated and stable publication is not
-enabled under this policy. [Issue #2](https://github.com/cosentinode/rolegit/issues/2) and
-[PR #52](https://github.com/cosentinode/rolegit/pull/52) track that CI and trusted-enforcement work.
+The repository CI workflows delivered by [PR #52](https://github.com/cosentinode/rolegit/pull/52)
+run typecheck, build, test, package dry-run, CLI smoke, and pull-request title checks for pull requests
+to both `develop` and `main`; branch protection requires those check contexts on both branches. That
+is not yet trusted, unspoofable enforcement because the required contexts are produced by the generic
+GitHub Actions app and a pull-request-controlled workflow can duplicate them. [Issue
+#2](https://github.com/cosentinode/rolegit/issues/2) remains open for secure enforcement. Stable
+publication also remains disabled until package ownership and trusted publishing are configured.
 
 ## GitHub Login
 
