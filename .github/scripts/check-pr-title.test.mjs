@@ -18,6 +18,8 @@ test("accepts Conventional Commits titles", () => {
     "fix: handle missing configuration",
     "feat(cli): add login command",
     "refactor!: remove legacy format",
+    "chore(release): v1.2.3",
+    "revert: unsafe change",
   ]) {
     assert.equal(check(title).status, 0, title);
   }
@@ -28,6 +30,9 @@ test("rejects non-Conventional Commits titles", () => {
     "Add login command",
     "feature: add login command",
     "fix: ",
+    "Merge pull request #123 from owner/branch",
+    "v1.2.3",
+    'Revert "unsafe change"',
   ]) {
     const result = check(title);
     assert.equal(result.status, 1, title);
