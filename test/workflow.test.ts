@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { rmSync, writeFileSync } from "node:fs";
 import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -906,8 +907,7 @@ test("concurrent protect commands retain every policy update", async (context) =
   assert.equal(children.every(({ child }) => child.exitCode === null), true);
   release();
   await holder;
-  const exitCodes = await Promise.all(children.map(({ exit }) => exit));
-  assert.deepEqual(exitCodes, [0, 0, 0, 0]);
+  for (const child of children) assert.equal(await child.exit, 0, child.stderr());
   assert.deepEqual(Object.keys((await loadEnclist(root)).files).sort(), protectedPaths.sort());
 });
 
@@ -984,6 +984,74 @@ test("a killed lock owner fails closed for every concurrent waiter", async (cont
   await rm(operationLockPath(root, home));
   await saveLease(leaseFor(root, session, []));
   assert.equal((await loadLease(root)).sessionId, sessionId(session));
+});
+
+test("a dead lock that vanishes or is replaced during liveness checking is retried", async (context) => {
+  for (const outcome of ["vanished", "replaced"] as const) {
+    const root = await temporaryDirectory(context, `rolegit-${outcome}-lock-`);
+    const home = `${root}-home`;
+    process.env.ROLEGIT_HOME = home;
+    const destination = instanceLockPath(root, home);
+    await mkdir(path.dirname(destination), { recursive: true });
+    const initialPid = 1_000_001;
+    const replacementPid = 1_000_002;
+    await writeFile(destination, JSON.stringify({
+      pid: initialPid,
+      token: "initial-owner",
+      createdAt: Date.now(),
+    }));
+    const checkedPids: number[] = [];
+    const originalKill = process.kill;
+    process.kill = ((pid: number, signal?: string | number) => {
+      if (signal === 0 && (pid === initialPid || pid === replacementPid)) {
+        checkedPids.push(pid);
+        if (outcome === "replaced" && pid === initialPid) {
+          writeFileSync(destination, JSON.stringify({
+            pid: replacementPid,
+            token: "replacement-owner",
+            createdAt: Date.now(),
+          }));
+        } else {
+          rmSync(destination);
+        }
+        throw Object.assign(new Error("process not found"), { code: "ESRCH" });
+      }
+      return originalKill(pid, signal);
+    }) as typeof process.kill;
+    try {
+      await withRepositoryLock(root, async () => undefined);
+    } finally {
+      process.kill = originalKill;
+    }
+    assert.deepEqual(checkedPids, outcome === "replaced" ? [initialPid, replacementPid] : [initialPid]);
+  }
+});
+
+test("a dead lock with the same token still fails closed after revalidation", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-retained-stale-lock-");
+  const home = `${root}-home`;
+  process.env.ROLEGIT_HOME = home;
+  const destination = instanceLockPath(root, home);
+  await mkdir(path.dirname(destination), { recursive: true });
+  const stalePid = 1_000_003;
+  await writeFile(destination, JSON.stringify({
+    pid: stalePid,
+    token: "retained-owner",
+    createdAt: Date.now(),
+  }));
+  const originalKill = process.kill;
+  process.kill = ((pid: number, signal?: string | number) => {
+    if (signal === 0 && pid === stalePid) {
+      throw Object.assign(new Error("process not found"), { code: "ESRCH" });
+    }
+    return originalKill(pid, signal);
+  }) as typeof process.kill;
+  try {
+    await assert.rejects(() => withRepositoryLock(root, async () => undefined), /stale state lock/);
+  } finally {
+    process.kill = originalKill;
+  }
+  assert.equal(JSON.parse(await readFile(destination, "utf8")).token, "retained-owner");
 });
 
 test("invalid state locks fail closed without waiting for timeout", async (context) => {
