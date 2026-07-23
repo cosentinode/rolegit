@@ -37,9 +37,17 @@ test("public docs preserve architecture, release, and parsing boundaries", async
     assert.match(diagram, /\|unlock:/);
     assert.match(diagram, /plaintext-DEK holder/);
   }
-  assert.equal([...architecture.matchAll(/generates and unwraps plaintext DEKs; decrypt-capable/g)].length, 3);
-  assert.equal([...architecture.matchAll(/seal: return plaintext DEK and wrapped DEK/g)].length, 3);
-  assert.equal([...architecture.matchAll(/unlock: return plaintext DEK after/g)].length, 3);
+  const keyProviderDiagram = diagrams.find((diagram) => diagram.includes("Customer key provider and agent"));
+  assert.ok(keyProviderDiagram);
+  assert.match(keyProviderDiagram, /seal A: request provider-generated DEK/);
+  assert.match(keyProviderDiagram, /seal A: return plaintext DEK and wrapped DEK/);
+  assert.match(keyProviderDiagram, /seal B1: send client-generated plaintext DEK and context for remote wrap/);
+  assert.match(keyProviderDiagram, /seal B1: return wrapped DEK only/);
+  assert.match(keyProviderDiagram, /seal B2: authenticated public wrapping key for local wrap; no plaintext DEK received/);
+  assert.match(keyProviderDiagram, /unlock: return plaintext DEK after authorization/);
+  assert.match(architecture, /provider contract requires wrap and unwrap without assuming a\s+provider-specific data-key-generation API/);
+  assert.match(architecture, /Provider-generated and remote-wrap\s+sealing place plaintext DEKs inside the provider\/agent boundary/);
+  assert.match(architecture, /local public-key wrapping does not do\s+so during sealing/);
   assert.match(protocols, /silently ignore unknown object fields/);
   assert.match(protocols, /not fail-closed extensibility/);
   assert.match(protocols, /`develop` is the integration branch and the base for feature and maintenance pull requests/);

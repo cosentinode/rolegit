@@ -8,7 +8,7 @@
 RoleGit is moving from a centralized proof of concept to a local-first product. Across Community,
 Team, and Enterprise offerings, a RoleGit-operated service must not receive plaintext or the private
 key material needed to decrypt repository content. Enterprise customers may instead choose to place
-key authority in infrastructure they control.
+key authority in key-provider infrastructure they control.
 
 This ADR describes the target architecture. The implemented v1 authorization service is classified
 separately under [Centralized Prototype](#centralized-prototype).
@@ -27,20 +27,21 @@ zero-knowledge proofs, and it does not mean the service learns no metadata.
 
 Community is the default architecture and performs encryption and decryption on authorized user
 devices. Team adds optional metadata-only coordination without entering the key-custody boundary.
-Enterprise adds customer-controlled KMS and self-hosted choices. A RoleGit-operated Team service is
-never a policy or decryption-key authority and does not receive the material needed to decrypt files;
-Community's Git/customer synchronization path and Team's coordinator remain part of their respective
-authorization-freshness boundaries until a global transparency and consistency protocol is specified.
+Enterprise adds customer-controlled key-provider and self-hosted choices. A RoleGit-operated Team
+service is never a policy or decryption-key authority and does not receive the material needed to
+decrypt files; Community's Git/customer synchronization path and Team's coordinator remain part of
+their respective authorization-freshness boundaries until a global transparency and consistency
+protocol is specified.
 
 | Mode | Key authority | Confidentiality trust boundary | Actors able to decrypt protected files |
 | --- | --- | --- | --- |
 | Community local-first | A customer-controlled repository policy root authorizes policy-signing keys and recipient snapshots; recipient and recovery private keys unwrap DEKs | Customer policy-signing authority and authorized devices; Git/customer synchronization remains outside key custody but is trusted for signed-state freshness until global consistency is specified | Devices whose recipient or recovery key was authorized when that protected version was sealed, including retained historical versions |
 | Team zero-knowledge coordination | The same customer-controlled policy root and recipient private keys as Community; Team membership results are inputs, not authority | Customer policy-signing authority and authorized devices; Team remains outside key custody but is trusted for availability and freshness of signed metadata until transparency is specified | Devices whose recipient or recovery key was authorized when that protected version was sealed; RoleGit Cloud has no decryption key material |
-| Enterprise customer KMS | The customer's KMS policy and keys | Authorized clients plus the customer KMS security boundary | Clients currently authorized to unwrap or retaining a previously released DEK; the customer KMS is treated as decrypt-capable because it can unwrap DEKs |
+| Enterprise customer key provider | The customer's provider policy and wrapping/unwrap keys | Authorized clients plus the customer-controlled provider/agent security boundary | Clients currently authorized to unwrap or retaining a previously released DEK; the provider/agent is treated as decrypt-capable because it controls unwrap |
 | Enterprise content-blind self-hosted | The customer-controlled policy root and recipient private keys | Customer policy-signing authority and authorized devices; the customer-hosted coordinator has the same freshness limitation as Team | Devices whose recipient or recovery key was authorized when that protected version was sealed, including retained historical versions |
 | Enterprise key-broker self-hosted | The customer's self-hosted broker and KMS/KEK | Authorized clients plus the entire customer-operated broker and KMS boundary | Clients currently authorized to unwrap or retaining a previously released DEK, and the customer-controlled key boundary; no RoleGit-operated service |
 
-Specific object schemas, algorithms, signature encodings, and KMS APIs belong in versioned protocol
+Specific object schemas, algorithms, signature encodings, and key-provider APIs belong in versioned protocol
 specifications. They must preserve these boundaries and the following authority rules.
 
 ### Policy Authority and Client Verification
@@ -84,13 +85,13 @@ check out and decrypt an older commit. Publishing a new snapshot or re-sealing t
 with a fresh DEK excludes the recipient from that new version, subject to the freshness limitation
 above, but does not change retained history.
 
-In Enterprise KMS and key-broker modes, and in the centralized prototype, authorization gates DEK
-generation or unwrap requests. Credentials, sessions, or tokens expire independently; they do not set
-a cryptographic expiry on a generated DEK. Revocation can deny a later unwrap, but cannot recall a DEK
-or plaintext already released. Merely re-wrapping or re-encrypting the current version also leaves
-older ciphertext and wrapped DEKs in Git. Unlike recipient removal, service-side policy revocation can
-deny future unwraps of both current and historical objects, provided the actor did not retain the
-released material.
+In Enterprise key-provider and key-broker modes, and in the centralized prototype, authorization
+gates DEK generation, wrap, or unwrap requests. Credentials, sessions, or tokens expire independently;
+they do not set a cryptographic expiry on a generated DEK. Revocation can deny a later unwrap, but
+cannot recall a DEK or plaintext already released. Merely re-wrapping or re-encrypting the current
+version also leaves older ciphertext and wrapped DEKs in Git. Unlike recipient removal, service-side
+policy revocation can deny future unwraps of both current and historical objects, provided the actor
+did not retain the released material.
 
 Where historical ciphertext remains decryptable after a policy change, repository-side removal
 requires new DEKs, re-encryption, any required recipient or wrapping-key rotation, and removal of old
@@ -146,19 +147,30 @@ remaining metadata-freshness trust and delayed-revocation risk are defined above
 an unconditional confidentiality claim. Recipient removal is not retroactive for objects retained in
 Git history.
 
-### Enterprise Customer KMS
+### Enterprise Customer Key Provider
 
-An Enterprise client or customer agent may invoke the customer's KMS directly. RoleGit Cloud may
-provide the same optional metadata coordination as Team, but it is not in the key path. KMS policy,
-availability, audit, rotation, and revocation are customer responsibilities. For sealing, the client
-requests a fresh data key and the KMS returns both its plaintext and wrapped forms. The client encrypts
-locally and persists only the ciphertext and wrapped DEK. For unlock, the KMS authorizes the wrapped
-DEK and authenticated context before returning the plaintext DEK to the client.
+An Enterprise client or customer agent may invoke the customer's key provider, such as a KMS, HSM, or
+Vault deployment, directly. RoleGit Cloud may provide the same optional metadata coordination as Team,
+but it is not in the key path. Provider policy, availability, audit, rotation, and revocation are
+customer responsibilities. The provider contract requires wrap and unwrap without assuming a
+provider-specific data-key-generation API. When supported, a provider-generated sealing variant
+requests a fresh DEK and receives its plaintext and wrapped forms. A client-generated-plus-wrap
+variant creates the DEK in the client or customer agent and produces only a wrapped form for
+persistence: remote wrap sends that plaintext DEK into the provider/agent boundary and returns the
+wrapped form, while local wrapping with an authenticated provider public key sends no plaintext DEK
+across that boundary during sealing.
+
+In every variant, the client encrypts locally and persists only the ciphertext and wrapped DEK. For
+unlock, the provider authorizes the wrapped DEK and authenticated context before the provider or its
+customer agent returns the plaintext DEK to the client.
 
 ```mermaid
 flowchart LR
-    D[Authorized client or customer agent: plaintext-DEK holder and decrypt-capable] -->|seal: request fresh data key with authenticated context| K[Customer KMS: generates and unwraps plaintext DEKs; decrypt-capable]
-    K -->|seal: return plaintext DEK and wrapped DEK| D
+    D[Authorized client or customer agent: plaintext-DEK holder and decrypt-capable] -->|seal A: request provider-generated DEK with authenticated context| K[Customer key provider and agent: generates or wraps and unwraps DEKs; decrypt-capable]
+    K -->|seal A: return plaintext DEK and wrapped DEK| D
+    D -->|seal B1: send client-generated plaintext DEK and context for remote wrap| K
+    K -->|seal B1: return wrapped DEK only| D
+    K -.->|seal B2: authenticated public wrapping key for local wrap; no plaintext DEK received| D
     D -->|seal: encrypt locally; store ciphertext and wrapped DEK| G[Git host: cannot decrypt]
     G -->|unlock: encrypted object and wrapped DEK| D
     D -->|unlock: request unwrap with wrapped DEK and authenticated context| K
@@ -167,8 +179,10 @@ flowchart LR
     D <-->|optional metadata only| T[RoleGit Team: cannot decrypt]
 ```
 
-The authorized client can decrypt after KMS authorization. The customer KMS is treated as capable of
-decryption because it controls DEK unwrapping. RoleGit Cloud and the Git host cannot decrypt. KMS
+The authorized client can decrypt after provider authorization. Provider-generated and remote-wrap
+sealing place plaintext DEKs inside the provider/agent boundary; local public-key wrapping does not do
+so during sealing. The customer provider/agent boundary is nevertheless always treated as
+decrypt-capable because it controls unwrap. RoleGit Cloud and the Git host cannot decrypt. Provider
 revocation can block future unwraps of current and historical objects, but cannot revoke a DEK or
 plaintext the client already received. If old ciphertext remains decryptable, repository-side removal
 requires the broader rotation described above.
@@ -288,7 +302,7 @@ service and thereby compromise confidentiality and authenticity of future seals.
   erase retained copies.
 - Team can improve coordination but cannot perform server-side plaintext processing or key recovery;
   it remains trusted for signed-metadata freshness until the transparency protocol is specified.
-- Enterprise customers that select KMS or key-broker modes intentionally expand the decrypt-capable
+- Enterprise customers that select key-provider or key-broker modes intentionally expand the decrypt-capable
   boundary to customer-controlled infrastructure.
 - The centralized prototype's tracked service endpoint is inside its bootstrap and confidentiality
   boundary: repository writers can redirect future login and key operations unless users verify the
