@@ -8,6 +8,7 @@ import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { once } from "node:events";
 import { createServer } from "node:http";
+import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
 
 import { createAuthServer } from "../src/auth-server.js";
@@ -39,6 +40,8 @@ import {
 } from "../src/session.js";
 import type { LocalSession, MaterializationLease, MaterializedFile, ServerPolicy } from "../src/types.js";
 
+const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+
 function localSession(
   server: string,
   id: number,
@@ -55,6 +58,39 @@ function localSession(
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function runCli(
+  root: string,
+  home: string,
+  args: string[],
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  const child = spawn(process.execPath, [path.join(projectRoot, "dist/src/cli.js"), ...args], {
+    cwd: root,
+    env: { ...process.env, ROLEGIT_HOME: home },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => { stdout += chunk; });
+  child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+  const code = await new Promise<number | null>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`CLI timed out: ${args.join(" ")}\n${stderr}`));
+    }, 30_000);
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once("exit", (exitCode) => {
+      clearTimeout(timeout);
+      resolve(exitCode);
+    });
+  });
+  return { code, stdout, stderr };
 }
 
 async function temporaryDirectory(context: TestContext, prefix: string): Promise<string> {
@@ -273,6 +309,97 @@ test("protect, seal, lock, and unlock workflow", async (context) => {
   await rm(path.join(root, ".enclist"));
   await lock(root);
   await assert.rejects(() => stat(path.join(root, ".env")), { code: "ENOENT" });
+});
+
+test("workflow output does not expose secret canaries", async (context) => {
+  const root = await temporaryDirectory(context, "rolegit-output-canary-");
+  const home = `${root}-home`;
+  process.env.ROLEGIT_HOME = home;
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  const plaintextCanary = "PLAINTEXT_CANARY_ISSUE_6";
+  const kekCanary = "KEK_CANARY_ISSUE_6";
+  const serverPolicy: ServerPolicy = {
+    version: 1,
+    sessionMinutes: 60,
+    keyId: "output-canary-key",
+    developmentUsers: [{ id: 101, login: "output-canary-user" }],
+    vaults: {},
+  };
+  const server = createAuthServer({
+    policy: serverPolicy,
+    keyEncryptionKey: Buffer.from(kekCanary.padEnd(32, "!")),
+    allowDevelopmentAuth: true,
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  context.after(() => server.close());
+  const authServer = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const output: string[] = [];
+  const tokens: string[] = [];
+  const command = async (args: string[], expectedCode = 0) => {
+    const result = await runCli(root, home, args);
+    output.push(result.stdout, result.stderr);
+    assert.equal(result.code, expectedCode, `${args.join(" ")}\n${result.stderr}`);
+    return result;
+  };
+
+  await command(["init", "--server", authServer]);
+  await writeFile(path.join(root, ".env"), `${plaintextCanary}=value\n`);
+  await command(["protect", ".env"]);
+  const enclist = await loadEnclist(root);
+  serverPolicy.vaults[enclist.vaultId] = {
+    repository: "local/output-canary",
+    files: { ".env": { users: [101], teams: [] } },
+  };
+
+  await command(["login", "--development-user", "101"]);
+  tokens.push((await loadSession(root, authServer)).token);
+  await command(["seal"]);
+  serverPolicy.vaults[enclist.vaultId]!.files[".env"] = { users: [], teams: [] };
+  const deniedByServer = await command(["seal"], 1);
+  assert.match(deniedByServer.stderr, /user is not authorized for this file/);
+  serverPolicy.vaults[enclist.vaultId]!.files[".env"] = { users: [101], teams: [] };
+  await command(["lock"]);
+
+  // GitHub Actions keeps detached processes in its Windows job object. Ubuntu covers the packaged
+  // unlock watcher; Windows still covers packaged command output and a rendered server denial above.
+  if (process.platform !== "win32") {
+    await rm(path.join(root, ".env"));
+    await command(["login", "--development-user", "101"]);
+    const unlockSession = await loadSession(root, authServer);
+    tokens.push(unlockSession.token);
+    await saveSession(root, { ...unlockSession, expiresAt: new Date(Date.now() + 8_000).toISOString() });
+    await command(["unlock"]);
+    assert.equal(await readFile(path.join(root, ".env"), "utf8"), `${plaintextCanary}=value\n`);
+
+    const existingDestination = await command(["unlock"], 1);
+    assert.match(existingDestination.stderr, /destination already exists/);
+    await command(["lock"]);
+    await command(["login", "--development-user", "101"]);
+    const expiringSession = await loadSession(root, authServer);
+    tokens.push(expiringSession.token);
+    await saveSession(root, { ...expiringSession, expiresAt: new Date(Date.now() + 1_500).toISOString() });
+    await command(["unlock"]);
+    const expiryDeadline = Date.now() + 8_000;
+    while (Date.now() < expiryDeadline) {
+      try {
+        await stat(path.join(root, ".env"));
+        await delay(100);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") break;
+        throw error;
+      }
+    }
+    await assert.rejects(() => stat(path.join(root, ".env")), { code: "ENOENT" });
+  }
+
+  const renderedOutput = output.join("\n");
+  assert.doesNotMatch(renderedOutput, new RegExp(plaintextCanary));
+  assert.doesNotMatch(renderedOutput, new RegExp(kekCanary));
+  for (const token of tokens) {
+    assert.notEqual(token, "");
+    assert.doesNotMatch(renderedOutput, new RegExp(token));
+  }
 });
 
 test("failed partial unlock retains cleanup ownership for plaintext rollback failures", async (context) => {

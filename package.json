@@ -8,7 +8,9 @@
   },
   "files": [
     "dist/src",
+    "SECURITY.md",
     "docs/security.md",
+    "docs/threat-model.md",
     "docs/adr/0001-product-modes-and-trust-boundaries.md",
     "docs/adr/0002-branches-protocols-and-repository-ownership.md",
     "README.md",

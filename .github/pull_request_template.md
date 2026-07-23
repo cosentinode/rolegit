@@ -26,4 +26,5 @@ Fixes #
 <!-- Note effects on key custody, authorization, trust boundaries, sensitive data, or supply chain. Write "None" if none. -->
 
 - [ ] No secrets, plaintext protected files, credentials, or private keys are included
+- [ ] Security-sensitive changes were checked against [`docs/threat-model.md`](https://github.com/cosentinode/rolegit/blob/develop/docs/threat-model.md)
 - [ ] Security and trust-boundary changes are reflected in the relevant documentation and tests, or are not applicable

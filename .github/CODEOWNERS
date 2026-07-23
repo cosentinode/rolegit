@@ -7,7 +7,9 @@
 /package-lock.json @cosentinode
 
 # Security model, protocol contracts, and security-critical implementation.
+/SECURITY.md @cosentinode
 /docs/security.md @cosentinode
+/docs/threat-model.md @cosentinode
 /docs/adr/ @cosentinode
 /server-policy.example.json @cosentinode
 /src/auth-client.ts @cosentinode
