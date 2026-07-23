@@ -315,6 +315,13 @@ async function withStateLock<T>(destination: string, operation: () => Promise<T>
         throw new Error(`invalid state lock ${destination}; verify no RoleGit process is using it before removal`);
       }
       if (!(await processIsAlive(parsed.pid))) {
+        try {
+          const current = JSON.parse(await readFile(destination, "utf8")) as Partial<LockOwner>;
+          if (current.token !== parsed.token) continue;
+        } catch {
+          // The owner may have released the lock after it was read.
+          continue;
+        }
         throw new Error(`stale state lock ${destination}; verify the owner exited before removal`);
       }
       if (Date.now() >= deadline) throw new Error(`timed out waiting for state lock ${destination}`);
