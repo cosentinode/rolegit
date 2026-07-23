@@ -1,7 +1,7 @@
 name: PR title
 
 on:
-  pull_request:
+  pull_request_target:
     branches: [develop, main]
     types: [opened, edited, synchronize, reopened]
 
@@ -17,11 +17,12 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           persist-credentials: false
+          ref: ${{ github.event.repository.default_branch }}
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
-      - run: printf '%s\n' "$PR_TITLE" | npm run lint:commit
+      - run: npm ci --ignore-scripts
+      - run: printf '%s\n' "$PR_TITLE" | ./node_modules/.bin/commitlint
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}

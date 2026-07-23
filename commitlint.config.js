@@ -3,7 +3,7 @@ export default {
   extends: ["@commitlint/config-conventional"],
   parserPreset: {
     parserOpts: {
-      headerPattern: /^(\w+)(?:\(([^)]+)\))?(!)?: (.+)$/,
+      headerPattern: /^(\w+)(?:\(([^)\s](?:[^)]*[^)\s])?)\))?(!)?: (\S(?:.*\S)?)$/,
       headerCorrespondence: ["type", "scope", "breaking", "subject"],
     },
   },
