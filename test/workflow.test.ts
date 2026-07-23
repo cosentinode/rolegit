@@ -810,7 +810,7 @@ test("a killed materialization process leaves durable cleanup ownership", async 
     });
     await writeMaterializedFile(process.env.CHILD_ROOT, file.path, plaintext);
     process.stdout.write("ready\\n");
-    await new Promise(() => {});
+    await new Promise(() => setInterval(() => undefined, 1_000));
   `, {
     CHILD_GENERATION: generation,
     CHILD_PLAINTEXT: plaintext.toString("utf8"),
