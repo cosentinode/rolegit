@@ -37,17 +37,30 @@ test("public docs preserve architecture, release, and parsing boundaries", async
     assert.match(diagram, /\|unlock:/);
     assert.match(diagram, /plaintext-DEK holder/);
   }
-  const keyProviderDiagram = diagrams.find((diagram) => diagram.includes("Customer key provider and agent"));
+  for (const recipientDiagramMarker of [
+    "RoleGit Cloud: cannot decrypt; absent from content and key paths",
+    "RoleGit Team: metadata only; cannot decrypt",
+    "Customer content-blind coordinator: cannot decrypt",
+  ]) {
+    const recipientDiagram = diagrams.find((diagram) => diagram.includes(recipientDiagramMarker));
+    assert.ok(recipientDiagram);
+    assert.match(recipientDiagram, /Authorized recovery-key holder: plaintext-DEK holder and decrypt-capable/);
+    assert.match(recipientDiagram, /unlock: unwrap plaintext DEK with recovery private key and decrypt locally/);
+  }
+  const keyProviderDiagram = diagrams.find((diagram) => diagram.includes("Customer key provider or provider-side customer agent"));
   assert.ok(keyProviderDiagram);
+  assert.match(keyProviderDiagram, /Authorized client or client-side customer agent/);
   assert.match(keyProviderDiagram, /seal A: request provider-generated DEK/);
   assert.match(keyProviderDiagram, /seal A: return plaintext DEK and wrapped DEK/);
   assert.match(keyProviderDiagram, /seal B1: send client-generated plaintext DEK and context for remote wrap/);
   assert.match(keyProviderDiagram, /seal B1: return wrapped DEK only/);
   assert.match(keyProviderDiagram, /seal B2: authenticated public wrapping key for local wrap; no plaintext DEK received/);
   assert.match(keyProviderDiagram, /unlock: return plaintext DEK after authorization/);
-  assert.match(architecture, /provider contract requires wrap and unwrap without assuming a\s+provider-specific data-key-generation API/);
-  assert.match(architecture, /Provider-generated and remote-wrap\s+sealing place plaintext DEKs inside the provider\/agent boundary/);
-  assert.match(architecture, /local public-key wrapping does not do\s+so during sealing/);
+  assert.match(architecture, /provider\s+contract requires wrap and unwrap without assuming a\s+provider-specific data-key-generation API/);
+  assert.match(architecture, /client-side agent\s+runs in the authorized client boundary/);
+  assert.match(architecture, /provider-side agent runs\s+inside the customer provider security boundary/);
+  assert.match(architecture, /Provider-generated and remote-wrap sealing place plaintext DEKs inside the provider\/provider-side-agent\s+boundary/);
+  assert.match(architecture, /client-side local public-key wrapping does not do so during sealing/);
   assert.match(protocols, /silently ignore unknown object fields/);
   assert.match(protocols, /not fail-closed extensibility/);
   assert.match(protocols, /`develop` is the integration branch and the base for feature and maintenance pull requests/);

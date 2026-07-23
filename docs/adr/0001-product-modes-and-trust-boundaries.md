@@ -37,7 +37,7 @@ protocol is specified.
 | --- | --- | --- | --- |
 | Community local-first | A customer-controlled repository policy root authorizes policy-signing keys and recipient snapshots; recipient and recovery private keys unwrap DEKs | Customer policy-signing authority and authorized devices; Git/customer synchronization remains outside key custody but is trusted for signed-state freshness until global consistency is specified | Devices whose recipient or recovery key was authorized when that protected version was sealed, including retained historical versions |
 | Team zero-knowledge coordination | The same customer-controlled policy root and recipient private keys as Community; Team membership results are inputs, not authority | Customer policy-signing authority and authorized devices; Team remains outside key custody but is trusted for availability and freshness of signed metadata until transparency is specified | Devices whose recipient or recovery key was authorized when that protected version was sealed; RoleGit Cloud has no decryption key material |
-| Enterprise customer key provider | The customer's provider policy and wrapping/unwrap keys | Authorized clients plus the customer-controlled provider/agent security boundary | Clients currently authorized to unwrap or retaining a previously released DEK; the provider/agent is treated as decrypt-capable because it controls unwrap |
+| Enterprise customer key provider | The customer's provider policy and wrapping/unwrap keys | Authorized clients and client-side agents plus the customer-controlled provider/provider-side-agent security boundary | Clients and client-side agents currently authorized to unwrap or retaining a previously released DEK; the provider-side boundary is treated as decrypt-capable because it controls unwrap |
 | Enterprise content-blind self-hosted | The customer-controlled policy root and recipient private keys | Customer policy-signing authority and authorized devices; the customer-hosted coordinator has the same freshness limitation as Team | Devices whose recipient or recovery key was authorized when that protected version was sealed, including retained historical versions |
 | Enterprise key-broker self-hosted | The customer's self-hosted broker and KMS/KEK | Authorized clients plus the entire customer-operated broker and KMS boundary | Clients currently authorized to unwrap or retaining a previously released DEK, and the customer-controlled key boundary; no RoleGit-operated service |
 
@@ -116,6 +116,8 @@ flowchart LR
     A -->|seal: verify state, generate plaintext DEK, encrypt, and wrap DEK to recipients| G
     G -->|unlock: encrypted object and wrapped DEK| B[Authorized recipient device: plaintext-DEK holder and decrypt-capable]
     B -->|unlock: unwrap plaintext DEK with private key and decrypt locally| P[Plaintext on authorized device]
+    G -->|unlock: encrypted object and recovery-wrapped DEK| H[Authorized recovery-key holder: plaintext-DEK holder and decrypt-capable]
+    H -->|unlock: unwrap plaintext DEK with recovery private key and decrypt locally| P
     C[RoleGit Cloud: cannot decrypt; absent from content and key paths]
 ```
 
@@ -139,6 +141,8 @@ flowchart LR
     S -->|seal: verify state, generate plaintext DEK, encrypt, and wrap DEK to recipients| G[Git host: cannot decrypt]
     G -->|unlock: encrypted object and wrapped DEK| D[Authorized recipient device: plaintext-DEK holder and decrypt-capable]
     D -->|unlock: unwrap plaintext DEK with private key and decrypt locally| P[Plaintext on authorized device]
+    G -->|unlock: encrypted object and recovery-wrapped DEK| H[Authorized recovery-key holder: plaintext-DEK holder and decrypt-capable]
+    H -->|unlock: unwrap plaintext DEK with recovery private key and decrypt locally| P
 ```
 
 Only a device holding an authorized recipient or recovery private key can directly decrypt. RoleGit
@@ -149,24 +153,27 @@ Git history.
 
 ### Enterprise Customer Key Provider
 
-An Enterprise client or customer agent may invoke the customer's key provider, such as a KMS, HSM, or
-Vault deployment, directly. RoleGit Cloud may provide the same optional metadata coordination as Team,
-but it is not in the key path. Provider policy, availability, audit, rotation, and revocation are
-customer responsibilities. The provider contract requires wrap and unwrap without assuming a
-provider-specific data-key-generation API. When supported, a provider-generated sealing variant
-requests a fresh DEK and receives its plaintext and wrapped forms. A client-generated-plus-wrap
-variant creates the DEK in the client or customer agent and produces only a wrapped form for
-persistence: remote wrap sends that plaintext DEK into the provider/agent boundary and returns the
-wrapped form, while local wrapping with an authenticated provider public key sends no plaintext DEK
-across that boundary during sealing.
+An Enterprise client or client-side customer agent may invoke the customer's key provider, such as a
+KMS, HSM, or Vault deployment, directly or through a provider-side customer agent. A client-side agent
+runs in the authorized client boundary and may handle plaintext DEKs; a provider-side agent runs
+inside the customer provider security boundary and is trusted like the provider. RoleGit Cloud may
+provide the same optional metadata coordination as Team, but it is not in the key path. Provider
+policy, availability, audit, rotation, and revocation are customer responsibilities. The provider
+contract requires wrap and unwrap without assuming a provider-specific data-key-generation API. When
+supported, a provider-generated sealing variant requests a fresh DEK and receives its plaintext and
+wrapped forms. A client-generated-plus-wrap variant creates the DEK only in the client or client-side
+agent and produces a wrapped form for persistence: remote wrap sends that plaintext DEK into the
+provider/provider-side-agent boundary and returns the wrapped form, while local wrapping in the client
+boundary with an authenticated provider public key sends no plaintext DEK into the provider boundary
+during sealing.
 
-In every variant, the client encrypts locally and persists only the ciphertext and wrapped DEK. For
-unlock, the provider authorizes the wrapped DEK and authenticated context before the provider or its
-customer agent returns the plaintext DEK to the client.
+In every variant, the client or client-side agent encrypts locally and persists only the ciphertext
+and wrapped DEK. For unlock, the provider authorizes the wrapped DEK and authenticated context before
+the provider or its provider-side agent returns the plaintext DEK to the client boundary.
 
 ```mermaid
 flowchart LR
-    D[Authorized client or customer agent: plaintext-DEK holder and decrypt-capable] -->|seal A: request provider-generated DEK with authenticated context| K[Customer key provider and agent: generates or wraps and unwraps DEKs; decrypt-capable]
+    D[Authorized client or client-side customer agent: plaintext-DEK holder and decrypt-capable] -->|seal A: request provider-generated DEK with authenticated context| K[Customer key provider or provider-side customer agent: generates or wraps and unwraps DEKs; decrypt-capable]
     K -->|seal A: return plaintext DEK and wrapped DEK| D
     D -->|seal B1: send client-generated plaintext DEK and context for remote wrap| K
     K -->|seal B1: return wrapped DEK only| D
@@ -179,13 +186,13 @@ flowchart LR
     D <-->|optional metadata only| T[RoleGit Team: cannot decrypt]
 ```
 
-The authorized client can decrypt after provider authorization. Provider-generated and remote-wrap
-sealing place plaintext DEKs inside the provider/agent boundary; local public-key wrapping does not do
-so during sealing. The customer provider/agent boundary is nevertheless always treated as
-decrypt-capable because it controls unwrap. RoleGit Cloud and the Git host cannot decrypt. Provider
-revocation can block future unwraps of current and historical objects, but cannot revoke a DEK or
-plaintext the client already received. If old ciphertext remains decryptable, repository-side removal
-requires the broader rotation described above.
+The authorized client or client-side agent can decrypt after provider authorization.
+Provider-generated and remote-wrap sealing place plaintext DEKs inside the provider/provider-side-agent
+boundary; client-side local public-key wrapping does not do so during sealing. The provider-side
+boundary is nevertheless always treated as decrypt-capable because it controls unwrap. RoleGit Cloud
+and the Git host cannot decrypt. Provider revocation can block future unwraps of current and historical
+objects, but cannot revoke a DEK or plaintext the client already received. If old ciphertext remains
+decryptable, repository-side removal requires the broader rotation described above.
 
 ### Enterprise Self-Hosted
 
@@ -205,6 +212,8 @@ flowchart LR
     S -->|seal: verify state, generate plaintext DEK, encrypt, and wrap DEK to recipients| G[Git host: cannot decrypt]
     G -->|unlock: encrypted object and wrapped DEK| D[Authorized customer recipient device: plaintext-DEK holder and decrypt-capable]
     D -->|unlock: unwrap plaintext DEK with private key and decrypt locally| P[Plaintext on customer device]
+    G -->|unlock: encrypted object and recovery-wrapped DEK| H[Authorized recovery-key holder: plaintext-DEK holder and decrypt-capable]
+    H -->|unlock: unwrap plaintext DEK with recovery private key and decrypt locally| P
     L[RoleGit Cloud: cannot decrypt; absent from deployment and key path]
 ```
 
